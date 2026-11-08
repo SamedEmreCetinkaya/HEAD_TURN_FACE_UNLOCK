@@ -1,11 +1,11 @@
 """One verification or one enrollment: both cameras stream, frames are analysed on two threads.
 
-The capture thread reads both devices through one poll() call, decodes color
-frames at half size and finds the face (about 8 ms of a 33 ms frame). Face
-embeddings (about 20 ms each) run on a second thread and only for frames that
-can matter: the two sharpest frames of each angle bin, and the lit infrared
-frames. Frames are never written anywhere; compressed color frames are kept in
-memory for a few seconds so a chosen frame can be decoded at full size later.
+The capture thread reads both devices through one poll() call, decodes each color frame
+at half size and finds the face and its 478 landmarks (about 4 ms of a 33 ms frame).
+Face embeddings (about 15 ms each) and the infrared frames run on a second thread, and
+embeddings only for frames that can matter: the two sharpest frames of each angle bin
+and the lit infrared frames. Frames are never written anywhere; compressed color frames
+stay in memory for a few seconds so a chosen frame can be decoded at full size later.
 """
 
 from __future__ import annotations
@@ -19,57 +19,64 @@ import time
 from dataclasses import dataclass
 from typing import Callable
 
+import cv2
 import numpy as np
 
-from . import decision, vision
+from . import decision, geometry, vision
 from . import v4l2_capture as v4l2
 from .cameras import CameraPair
 from .config import Settings
-from .decision import ColorSample, InfraredSample, Timing, Turn, Verdict
+from .decision import ColorSample, InfraredSample, Reference, Timing, Turn, Verdict
 from .template import Template, best_similarity, empty_bank, merge
 
 Say = Callable[[str], None]
-# Pre-compute embeddings for frames among the sharpest of their angle bin over this window.
+# Embed early when a frame is among the sharpest of its angle bin over this window.
 CANDIDATE_WINDOW_SECONDS = decision.EVIDENCE_SECONDS_BEFORE_TURN + 1.0
 KEEP_FRAMES_SECONDS = CANDIDATE_WINDOW_SECONDS + 2.0
-# An infrared frame takes its head angle from the nearest color frame within this many intervals.
-YAW_LOOKUP_INTERVALS = 3
-# Tell the person the infrared camera cannot see them after this long.
 INFRARED_HINT_SECONDS = 1.0
 JUDGE_GRACE_SECONDS = 0.5
-# Enrollment
-STRAIGHT_YAW = 0.08
-RIGHT_TURN_YAW = 0.33
+# Enrollment, in degrees of yaw.
+STRAIGHT_YAW = 5.0
+RIGHT_TURN_YAW = 25.0
 REQUIRED_BINS = range(1, 7)
 COLOR_TARGET_PER_BIN = 8
 INFRARED_TARGET_PER_BIN = 3
+SHAPE_TARGET = 15
 COLOR_CAP_PER_BIN = 20
 INFRARED_CAP_PER_BIN = 10
 DUPLICATE_SIMILARITY = 0.97
 ENROLL_IDENTITY = 0.50
 ENROLL_INFRARED_IDENTITY = 0.60
 OWNER_CONFIRMATION_SECONDS = 0.5
+SHAPE_SPREAD_FLOOR = 0.01
 
 
 class SessionError(Exception):
     """Ends a session; the argument is a message key."""
 
 
+class ModelSet:
+    """What a session needs from models.Models; tests pass their own."""
+    recognizer: vision.Recognizer
+
+    def new_finder(self):  # pragma: no cover - interface only
+        raise NotImplementedError
+
+
 @dataclass
 class _Color:
     sample: ColorSample
     jpeg: bytes
-    face: np.ndarray
+    five: np.ndarray  # alignment points in tracking pixels
 
 
 @dataclass(frozen=True)
 class _InfraredMeasure:
     timestamp: float
+    yaw: float  # as the camera sees it, before the enrolled direction is applied
     embedding: np.ndarray
     sharpness: float
-    face_level: float
-    nose_ratio: float
-    centroid: float
+    level: float
 
 
 class _Streams:
@@ -102,10 +109,10 @@ class _Streams:
 class _Worker(threading.Thread):
     """Embeds chosen color frames and analyses lit infrared frames off the capture thread."""
 
-    def __init__(self, models: vision.FaceModels) -> None:
+    def __init__(self, models: ModelSet) -> None:
         super().__init__(daemon=True, name="embedding")
-        self._models = models
-        self._detector = models.new_detector()
+        self._recognizer = models.recognizer
+        self._finder = models.new_finder()
         self._jobs: queue.Queue = queue.Queue()
         self.results: queue.Queue = queue.Queue()
         self._outstanding = 0
@@ -135,55 +142,69 @@ class _Worker(threading.Thread):
                     self._outstanding -= 1
 
     def _color(self, job: tuple) -> tuple:
-        _, key, jpeg, face = job
+        _, key, jpeg, five = job
         image = vision.decode_full(jpeg)
-        return ("color", key, None if image is None else self._models.embed(image, vision.to_full_scale(face)))
+        if image is None:
+            return ("color", key, None)
+        return ("color", key, self._recognizer.embed(image, five * vision.DETECTION_REDUCTION))
 
     def _infrared(self, job: tuple) -> tuple:
         _, timestamp, lit, difference = job
         image = np.repeat(lit[:, :, None], 3, axis=2)
-        faces = self._detector.detect(image)
-        if len(faces) != 1:
+        _, face = self._finder.find(image)
+        if face is None:
             return ("infrared", timestamp, None)
-        profile = vision.infrared_profile(difference, faces[0])
-        if profile is None:
+        level = vision.infrared_level(difference, face.points)
+        if level is None:
             return ("infrared", timestamp, None)
-        embedding = self._models.embed(image, faces[0])
-        return ("infrared", timestamp, _InfraredMeasure(timestamp, embedding, vision.sharpness(lit, faces[0]),
-                                                        *profile))
+        yaw, _, _ = geometry.pose(face.points)
+        centre_x, centre_y, width = geometry.face_box(face.points)
+        embedding = self._recognizer.embed(image, geometry.alignment_points(face.points))
+        return ("infrared", timestamp, _InfraredMeasure(timestamp, yaw, embedding,
+                                                        vision.sharpness(lit, centre_x, centre_y, width), level))
 
 
 class _Capture:
-    """Shared frame handling for verification and enrollment."""
+    """Frame handling shared by verification and enrollment."""
 
-    def __init__(self, models: vision.FaceModels, pair: CameraPair, direction: int,
-                 clock: Callable[[], float]) -> None:
+    def __init__(self, models: ModelSet, pair: CameraPair, direction: int, clock: Callable[[], float]) -> None:
         self.models = models
         self.pair = pair
         self.direction = direction
         self.clock = clock
         self.timing = Timing(1 / pair.color_mode.frames_per_second, 1 / pair.infrared_mode.frames_per_second)
-        self.detector = models.new_detector()
+        self.finder = models.new_finder()
         self.pairer = vision.InfraredPairer()
         self.colors: list[_Color] = []
         self.gaps: list[float] = []
         self.last_infrared_frame = -math.inf
         self.infrared_faces = 0
         self.infrared_empty = 0
+        self.tracked_frames = 0
+        self.tracking_seconds = 0.0
 
     def color_frame(self, frame: v4l2.Frame) -> _Color | None:
-        image = vision.decode_for_detection(frame.data)
+        started = time.perf_counter()
+        try:
+            return self._color_frame(frame)
+        finally:
+            self.tracked_frames += 1
+            self.tracking_seconds += time.perf_counter() - started
+
+    def _color_frame(self, frame: v4l2.Frame) -> _Color | None:
+        image = vision.decode_half(frame.data)
         if image is None:
             return None
-        faces = self.detector.detect(image)
-        if len(faces) != 1:
+        _, face = self.finder.find(cv2.cvtColor(image, cv2.COLOR_BGR2RGB))
+        if face is None:
             self.gaps.append(frame.timestamp)
             return None
-        face = faces[0]
-        sample = ColorSample(frame.timestamp, vision.yaw_index(face) * self.direction,
-                             float(face[0] + face[2] / 2), float(face[1] + face[3] / 2), float(face[2]),
-                             vision.sharpness(image, face))
-        color = _Color(sample, frame.data, face)
+        yaw, pitch, _ = geometry.pose(face.points)
+        centre_x, centre_y, width = geometry.face_box(face.points)
+        sample = ColorSample(frame.timestamp, yaw * self.direction, pitch, centre_x, centre_y, width,
+                             vision.sharpness(image, centre_x, centre_y, width), geometry.eye_distance(face.points),
+                             geometry.rigid_points(face.points), geometry.shape(face.points))
+        color = _Color(sample, frame.data, geometry.alignment_points(face.points))
         self.colors.append(color)
         return color
 
@@ -193,30 +214,18 @@ class _Capture:
             return None
         return self.pairer.push(np.ascontiguousarray(frame.grey()))
 
-    def yaw_near(self, timestamp: float) -> float | None:
-        tolerance = YAW_LOOKUP_INTERVALS * self.timing.color_interval
-        best = None
-        for color in reversed(self.colors):
-            gap = abs(color.sample.timestamp - timestamp)
-            if gap <= tolerance and (best is None or gap < best[0]):
-                best = (gap, color.sample.yaw)
-            if color.sample.timestamp < timestamp - tolerance:
-                break
-        return None if best is None else best[1]
-
-    def forget_old(self, keep_from: int) -> None:
+    def forget_old(self) -> None:
         """Drops the compressed data of old frames; their measurements stay."""
         cutoff = self.clock() - KEEP_FRAMES_SECONDS
-        for color in self.colors[keep_from:]:
+        for color in self.colors:
             if color.sample.timestamp >= cutoff:
                 break
             color.jpeg = b""
 
 
 class Verification:
-    def __init__(self, models: vision.FaceModels, pair: CameraPair, template: Template, settings: Settings,
-                 say: Say, cancelled: Callable[[], bool] = lambda: False,
-                 clock: Callable[[], float] = time.monotonic) -> None:
+    def __init__(self, models: ModelSet, pair: CameraPair, template: Template, settings: Settings, say: Say,
+                 cancelled: Callable[[], bool] = lambda: False, clock: Callable[[], float] = time.monotonic) -> None:
         self.cancelled = cancelled
         self.template = template
         self.settings = settings
@@ -227,7 +236,6 @@ class Verification:
         self.similarities: dict[int, float] = {}
         self.requested: set[int] = set()
         self.infrared: list[InfraredSample] = []
-        self.waiting_infrared: list[_InfraredMeasure] = []
         self.statistics = ""
 
     def run(self, deliver: Callable[[Verdict], None]) -> Verdict:
@@ -246,36 +254,31 @@ class Verification:
         capture, clock = self.capture, self.capture.clock
         started = clock()
         deadline = started + self.settings.ATTEMPT_SECONDS
+        grace = deadline + JUDGE_GRACE_SECONDS
         evaluated: set[tuple[float, float]] = set()
         last_rejection: Verdict | None = None
         pending: tuple[Turn, dict[int, list[int]]] | None = None
         hint_sent = False
         self.say("TURN_HEAD")
-        # A turn finished before the deadline may still be judged a little after it.
-        grace = deadline + JUDGE_GRACE_SECONDS
         while (now := clock()) < deadline or (pending is not None and now < grace):
             if self.cancelled():
                 raise SessionError("CANCELLED")
-            for camera, frame in streams.read(min(0.05, max(deadline, grace if pending else deadline) - now)):
+            for camera, frame in streams.read(min(0.05, (grace if pending else deadline) - now)):
                 if camera is streams.color:
-                    color = capture.color_frame(frame)
-                    if color is not None:
+                    if capture.color_frame(frame) is not None:
                         self._maybe_embed(len(capture.colors) - 1, worker)
-                else:
-                    lit = capture.infrared_frame(frame)
-                    if lit is not None:
-                        worker.submit(("infrared", frame.timestamp, *lit))
+                elif (lit := capture.infrared_frame(frame)) is not None:
+                    worker.submit(("infrared", frame.timestamp, *lit))
             self._collect(worker)
             if not hint_sent and self._infrared_blind(started):
                 self.say("INFRARED_CANNOT_SEE")
                 hint_sent = True
             if pending is None and now < deadline:
-                found = decision.find_turn([c.sample for c in capture.colors], capture.gaps, capture.timing,
-                                           evaluated, final=False)
+                found = decision.find_turn(self._samples(), capture.gaps, capture.timing, evaluated, final=False)
                 if isinstance(found, Verdict):
                     last_rejection = found
                 elif isinstance(found, Turn):
-                    chosen = decision.identity_frames([c.sample for c in capture.colors], found)
+                    chosen = decision.identity_frames(self._samples(), found)
                     for indexes in chosen.values():
                         for index in indexes:
                             self._request(index, worker)
@@ -286,29 +289,33 @@ class Verification:
                 if verdict.accepted:
                     return self._finish(verdict, started)
                 last_rejection = verdict
-            capture.forget_old(0)
+            capture.forget_old()
         if pending is not None:
             self._collect(worker)
             verdict = self._judge(*pending)
             if verdict.accepted:
                 return self._finish(verdict, started)
             last_rejection = verdict
-        final = decision.find_turn([c.sample for c in capture.colors], capture.gaps, capture.timing,
-                                   evaluated, final=True)
+        final = decision.find_turn(self._samples(), capture.gaps, capture.timing, evaluated, final=True)
         if isinstance(final, Turn):
             self._collect(worker)
-            final = self._judge(final, decision.identity_frames([c.sample for c in capture.colors], final))
+            final = self._judge(final, decision.identity_frames(self._samples(), final))
             if final.accepted:
                 return self._finish(final, started)
-        if isinstance(final, Verdict):
-            last_rejection = last_rejection if final.reason in ("RIGHT_TURN_MISSING", "LEFT_TURN_MISSING") \
-                and last_rejection else final
+        if isinstance(final, Verdict) and not (last_rejection and final.reason in ("RIGHT_TURN_MISSING",
+                                                                                   "LEFT_TURN_MISSING")):
+            last_rejection = final
         return self._finish(last_rejection or Verdict(False, "TIME_UP"), started)
+
+    def _samples(self) -> list[ColorSample]:
+        return [color.sample for color in self.capture.colors]
 
     def _finish(self, verdict: Verdict, started: float) -> Verdict:
         capture = self.capture
-        self.statistics = (f"{capture.clock() - started:.1f}s color {len(capture.colors)} "
-                           f"infrared {len(self.infrared)} embeddings {len(self.requested)}")
+        tracking = 1000 * capture.tracking_seconds / max(1, capture.tracked_frames)
+        self.statistics = (f"{capture.clock() - started:.1f}s color {len(capture.colors)}/{capture.tracked_frames} "
+                           f"tracking {tracking:.1f} ms/frame infrared {len(self.infrared)} "
+                           f"embeddings {len(self.requested)}")
         return verdict
 
     def _maybe_embed(self, index: int, worker: _Worker) -> None:
@@ -318,9 +325,9 @@ class Verification:
         angle = decision.bin_of(sample.yaw)
         if angle is None:
             return
-        rivals = [c.sample.sharpness for c in reversed(colors[:index])
-                  if c.sample.timestamp >= sample.timestamp - CANDIDATE_WINDOW_SECONDS
-                  and decision.bin_of(c.sample.yaw) == angle]
+        rivals = [color.sample.sharpness for color in reversed(colors[:index])
+                  if color.sample.timestamp >= sample.timestamp - CANDIDATE_WINDOW_SECONDS
+                  and decision.bin_of(color.sample.yaw) == angle]
         if sum(rival > sample.sharpness for rival in rivals) < decision.IDENTITY_FRAMES_PER_BIN:
             self._request(index, worker)
 
@@ -328,36 +335,26 @@ class Verification:
         color = self.capture.colors[index]
         if index not in self.requested and color.jpeg:
             self.requested.add(index)
-            worker.submit(("color", index, color.jpeg, color.face))
+            worker.submit(("color", index, color.jpeg, color.five))
 
     def _collect(self, worker: _Worker) -> None:
         while True:
             try:
                 kind, key, value = worker.results.get_nowait()
             except queue.Empty:
-                break
+                return
             if kind == "color":
-                sample = self.capture.colors[key].sample
-                angle = decision.bin_of(sample.yaw)
+                angle = decision.bin_of(self.capture.colors[key].sample.yaw)
                 self.similarities[key] = (-1.0 if value is None or angle is None
                                           else best_similarity(self.template.color, angle, value))
             elif value is None:
                 self.capture.infrared_empty += 1
             else:
                 self.capture.infrared_faces += 1
-                self.waiting_infrared.append(value)
-        still_waiting = []
-        for measure in self.waiting_infrared:
-            yaw = self.capture.yaw_near(measure.timestamp)
-            if yaw is None:
-                if self.capture.colors and self.capture.colors[-1].sample.timestamp < measure.timestamp:
-                    still_waiting.append(measure)
-                continue
-            angle = decision.bin_of(yaw)
-            similarity = -1.0 if angle is None else best_similarity(self.template.infrared, angle, measure.embedding)
-            self.infrared.append(InfraredSample(measure.timestamp, yaw, similarity, measure.sharpness,
-                                                measure.face_level, measure.nose_ratio, measure.centroid))
-        self.waiting_infrared = still_waiting
+                yaw = value.yaw * self.template.direction
+                angle = decision.bin_of(yaw)
+                similarity = -1.0 if angle is None else best_similarity(self.template.infrared, angle, value.embedding)
+                self.infrared.append(InfraredSample(value.timestamp, yaw, similarity, value.sharpness, value.level))
 
     def _infrared_blind(self, started: float) -> bool:
         capture = self.capture
@@ -376,32 +373,30 @@ class Verification:
         return self.capture.last_infrared_frame >= end + margin and worker.outstanding() == 0
 
     def _judge(self, turn: Turn, chosen: dict[int, list[int]]) -> Verdict:
-        samples = [c.sample for c in self.capture.colors]
-        return decision.judge(samples, turn, chosen, lambda index: self.similarities.get(index, -1.0),
+        return decision.judge(self._samples(), turn, chosen, lambda index: self.similarities.get(index, -1.0),
                               self.infrared, self.template.reference, self.thresholds, self.capture.timing)
 
 
 class Enrollment:
-    """Collects color and infrared samples across the angle bins.
+    """Collects color and infrared samples across the angle bins and the face's proportions.
     With an existing template only the enrolled person's face is accepted."""
 
-    def __init__(self, models: vision.FaceModels, pair: CameraPair, settings: Settings, say: Say,
+    def __init__(self, models: ModelSet, pair: CameraPair, settings: Settings, say: Say,
                  progress: Callable[[list[int]], None], existing: Template | None,
-                 cancelled: Callable[[], bool] = lambda: False,
-                 clock: Callable[[], float] = time.monotonic) -> None:
+                 cancelled: Callable[[], bool] = lambda: False, clock: Callable[[], float] = time.monotonic) -> None:
         self.cancelled = cancelled
         self.settings = settings
         self.say = say
         self.progress = progress
         self.existing = existing
         self.capture = _Capture(models, pair, 1, clock)
-        self.color = [[] for _ in range(decision.BIN_COUNT)]
-        self.infrared = [[] for _ in range(decision.BIN_COUNT)]
-        self.rows: list[tuple[float, float, float, float]] = []
+        self.color: list[list[np.ndarray]] = [[] for _ in range(decision.BIN_COUNT)]
+        self.infrared: list[list[np.ndarray]] = [[] for _ in range(decision.BIN_COUNT)]
+        self.levels: list[float] = []
+        self.shapes: list[np.ndarray] = []
         self.reference: list[np.ndarray] = []
         self.stage = 0
         self.direction = 1
-        self.yaws: list[tuple[float, float]] = []
         self.owner_seen_at = -math.inf
         self.skipped = {"color": 0, "infrared": 0}
 
@@ -417,8 +412,7 @@ class Enrollment:
     def _loop(self, streams: _Streams, worker: _Worker) -> Template:
         capture, clock = self.capture, self.capture.clock
         deadline = clock() + self.settings.ENROLL_SECONDS
-        last_progress = 0.0
-        last_warning = -math.inf
+        last_progress, last_warning = 0.0, -math.inf
         self.say("ENROLL_LOOK_STRAIGHT")
         while (now := clock()) < deadline:
             if self.cancelled():
@@ -428,7 +422,11 @@ class Enrollment:
                     self._color(frame, worker)
                 elif self.stage == 2 and (lit := capture.infrared_frame(frame)) is not None and worker.outstanding() < 3:
                     worker.submit(("infrared", frame.timestamp, *lit))
-            for kind, key, value in self._results(worker):
+            while True:
+                try:
+                    kind, key, value = worker.results.get_nowait()
+                except queue.Empty:
+                    break
                 if kind == "color" and key[0] == "straight" and self.stage == 0:
                     self._straight(value)
                 elif kind == "color" and key[0] == "sample" and value is not None:
@@ -439,43 +437,37 @@ class Enrollment:
                     self._add_infrared(value)
             if self.stage == 2:
                 done = self._percentages()
-                if min(done) >= 100:
+                if min(done) >= 100 and len(self.shapes) >= SHAPE_TARGET:
                     self.progress(done)
                     return self._build()
                 if clock() - last_progress > 0.3:
                     self.progress(done)
                     last_progress = clock()
-            capture.forget_old(0)
+            capture.forget_old()
         raise SessionError("ENROLL_TIME_UP")
 
     def _color(self, frame: v4l2.Frame, worker: _Worker) -> None:
         color = self.capture.color_frame(frame)
         if color is None:
             return
-        raw = color.sample.yaw
-        if self.stage == 0 and abs(raw) < STRAIGHT_YAW and worker.outstanding() == 0:
-            worker.submit(("color", ("straight",), color.jpeg, color.face))
-        elif self.stage == 1 and abs(raw) > RIGHT_TURN_YAW:
-            self.direction = 1 if raw > 0 else -1
+        sample = color.sample
+        if self.stage == 0 and abs(sample.yaw) < STRAIGHT_YAW and worker.outstanding() == 0:
+            worker.submit(("color", ("straight",), color.jpeg, color.five))
+        elif self.stage == 1 and abs(sample.yaw) > RIGHT_TURN_YAW:
+            self.direction = 1 if sample.yaw > 0 else -1
             if self.existing is not None and self.existing.direction != self.direction:
                 raise SessionError("ENROLL_DIRECTION_MISMATCH")
             self.stage = 2
             self.say("ENROLL_SWEEP")
         elif self.stage == 2:
-            yaw = raw * self.direction
-            self.yaws.append((color.sample.timestamp, yaw))
-            del self.yaws[:-90]
+            yaw = sample.yaw * self.direction
+            if (abs(yaw) <= decision.FRONTAL_YAW and abs(sample.pitch) <= decision.FRONTAL_PITCH
+                    and abs(sample.timestamp - self.owner_seen_at) <= OWNER_CONFIRMATION_SECONDS
+                    and np.isfinite(sample.shape).all()):
+                self.shapes.append(sample.shape)
             angle = decision.bin_of(yaw)
             if angle is not None and len(self.color[angle]) < COLOR_CAP_PER_BIN and worker.outstanding() < 2:
-                worker.submit(("color", ("sample", angle, color.sample.timestamp), color.jpeg, color.face))
-
-    def _results(self, worker: _Worker) -> list[tuple]:
-        items = []
-        while True:
-            try:
-                items.append(worker.results.get_nowait())
-            except queue.Empty:
-                return items
+                worker.submit(("color", ("sample", angle, sample.timestamp), color.jpeg, color.five))
 
     def _straight(self, embedding: np.ndarray | None) -> None:
         if embedding is None:
@@ -502,8 +494,7 @@ class Enrollment:
         return True
 
     def _add_infrared(self, measure: _InfraredMeasure) -> None:
-        yaw = self._yaw_near(measure.timestamp)
-        angle = None if yaw is None else decision.bin_of(yaw)
+        angle = decision.bin_of(measure.yaw * self.direction)
         if angle is None or len(self.infrared[angle]) >= INFRARED_CAP_PER_BIN:
             return
         if abs(measure.timestamp - self.owner_seen_at) > OWNER_CONFIRMATION_SECONDS:
@@ -515,13 +506,7 @@ class Enrollment:
             self.skipped["infrared"] += 1
             return
         self.infrared[angle].append(measure.embedding)
-        if angle in REQUIRED_BINS:
-            self.rows.append((yaw, measure.face_level, measure.nose_ratio, measure.centroid))
-
-    def _yaw_near(self, timestamp: float) -> float | None:
-        tolerance = YAW_LOOKUP_INTERVALS * self.capture.timing.color_interval
-        near = [(abs(t - timestamp), yaw) for t, yaw in self.yaws if abs(t - timestamp) <= tolerance]
-        return min(near)[1] if near else None
+        self.levels.append(measure.level)
 
     def _percentages(self) -> list[int]:
         return [min(100, int(100 * min(len(self.color[b]) / COLOR_TARGET_PER_BIN,
@@ -529,18 +514,17 @@ class Enrollment:
                 for b in REQUIRED_BINS]
 
     def _build(self) -> Template:
-        rows = np.array(self.rows, dtype=float)
-        slope = float(np.polyfit(rows[:, 0], rows[:, 3], 1)[0])
-        reference = decision.Reference(float(np.median(rows[:, 1])), float(np.percentile(rows[:, 2], 5)),
-                                       float(np.percentile(rows[:, 2], 95)), slope)
+        shapes = np.array(self.shapes)
+        median = np.median(shapes, axis=0)
+        spread = np.maximum(np.std(shapes, axis=0), SHAPE_SPREAD_FLOOR * median)
+        reference = Reference(float(statistics.median(self.levels)), median, spread)
         color, infrared = empty_bank(), empty_bank()
         for angle in range(decision.BIN_COUNT):
             if self.color[angle]:
                 color[angle] = np.array(self.color[angle], np.float32)
             if self.infrared[angle]:
                 infrared[angle] = np.array(self.infrared[angle], np.float32)
-        created = time.strftime("%Y-%m-%d %H:%M")
-        template = Template(self.direction, color, infrared, reference, created, [])
+        template = Template(self.direction, color, infrared, reference, time.strftime("%Y-%m-%d %H:%M"), [])
         if self.existing is not None:
             template = merge(self.existing, template)
         return template
@@ -548,6 +532,4 @@ class Enrollment:
 
 def describe_template(template: Template) -> str:
     color, infrared = template.counts()
-    return (f"color {sum(color)} infrared {sum(infrared)} samples, "
-            f"infrared slope {template.reference.centroid_slope:+.3f}, "
-            f"median color per bin {statistics.median(color):.0f}")
+    return f"color {sum(color)} infrared {sum(infrared)} samples, median color per bin {statistics.median(color):.0f}"

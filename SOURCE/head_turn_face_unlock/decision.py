@@ -1,17 +1,19 @@
 """Decides whether a head turn proves identity and liveness.
 
-Everything here is a pure function of measurements, so the rules can be tested
-without a camera. Every check is written as "reject unless the good condition
-holds", so a value that is not a number (NaN) can only lead to a rejection.
+Everything here is a pure function of measurements, so every rule can be tested without
+a camera. Every check is written as "reject unless the good condition holds", so a value
+that is not a number (NaN) can only lead to a rejection.
 
 The person turns the head from their right to their left. The turn must
-  - sweep at least TURN_SIDE to each side and TURN_TOTAL in all, in one direction,
-  - be one unbroken track: no frame without the face or with a second face, no
-    jump in position or size between frames (two recordings cannot be spliced),
+  - reach 20 degrees to each side, mostly in one direction, through at least 4 angle bins,
+  - be one unbroken track: no frame without exactly one face, no jump in position or size
+    between frames (two recordings cannot be spliced),
+  - move like a three-dimensional head: between the two ends of the turn the nose and the
+    visible outline shift against each other, which no flat picture can do,
   - match the enrolled face in color in every angle bin it crosses,
-  - be seen by the infrared camera, match the enrolled face there too, show a
-    skin-like reflection and move the infrared brightness centroid the way a
-    three-dimensional head does.
+  - keep the enrolled face's proportions on the frames that look at the camera,
+  - be seen by the infrared camera often enough, match the enrolled face there too, and
+    reflect the emitter's light like the enrolled face.
 """
 
 from __future__ import annotations
@@ -23,13 +25,14 @@ from typing import Callable, Sequence
 
 import numpy as np
 
-# Yaw index: nose offset from the face axis divided by face size, roughly sin(yaw).
-BINS = np.linspace(-0.6, 0.6, 9)
+from .geometry import parallax
+
+# Angle bins in degrees of yaw; positive is the person's right.
+BINS = np.linspace(-40.0, 40.0, 9)
 BIN_COUNT = len(BINS) - 1
-TURN_SIDE = 0.30
-TURN_TOTAL = 0.60
-# Landmark noise: a step back of up to this much still counts as moving in one direction.
-JITTER = 0.03
+TURN_SIDE = 20.0
+# Landmark noise: a step back of up to this many degrees still counts as one direction.
+JITTER = 3.0
 MONOTONIC_FRACTION = 0.7
 MINIMUM_TURN_FRAMES = 6
 MINIMUM_ANGLE_BINS = 4
@@ -37,17 +40,24 @@ MINIMUM_ANGLE_BINS = 4
 MAXIMUM_GAP_INTERVALS = 6
 JUMP_FACE_WIDTHS_PER_INTERVAL = 0.35
 SIZE_RATIO_RANGE = (0.7, 1.4)
-# Identity evidence may also come from the unbroken track just before the turn,
-# where people slow down at their right and frames are sharp.
+# Identity evidence may also come from the unbroken track just before the turn.
 EVIDENCE_SECONDS_BEFORE_TURN = 1.5
 IDENTITY_FRAMES_PER_BIN = 2
 MATCH_FRACTION = 0.8
 INFRARED_WINDOW_INTERVALS = 2
 MINIMUM_INFRARED_FRAMES = 4
-FACE_LEVEL_FRACTION = 0.4
-NOSE_RATIO_MARGIN = 0.15
-DEPTH_SLOPE_FRACTION = 0.4
-DEPTH_MINIMUM_YAW_SPAN = 0.2
+INFRARED_LEVEL_FRACTION = 0.4
+# Parallax as a fraction of the eye distance. A flat picture turned 10-30 degrees stays
+# under 1.2% (simulated with the measured landmark noise); the author's real turns gave
+# 44-176%, and 20-30 degree differences 13.8% at the 5th percentile.
+PARALLAX_MINIMUM = 0.15
+PARALLAX_PAIRS = 3
+# Proportions are compared on frames that look at the camera.
+FRONTAL_YAW = 10.0
+FRONTAL_PITCH = 15.0
+MINIMUM_FRONTAL_FRAMES = 3
+SHAPE_SPREADS = 3.0
+SHAPE_FLOOR = 0.03
 
 
 def bin_of(yaw: float) -> int | None:
@@ -57,15 +67,19 @@ def bin_of(yaw: float) -> int | None:
     return index if 0 <= index < BIN_COUNT else None
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, eq=False)
 class ColorSample:
-    """One color frame with exactly one face. Positions are in detection pixels."""
+    """One color frame with exactly one face. Positions are in tracking pixels."""
     timestamp: float
     yaw: float
+    pitch: float
     center_x: float
     center_y: float
     width: float
     sharpness: float
+    eye_distance: float
+    rigid: np.ndarray
+    shape: np.ndarray
 
 
 @dataclass(frozen=True)
@@ -74,18 +88,15 @@ class InfraredSample:
     yaw: float
     similarity: float
     sharpness: float
-    face_level: float
-    nose_ratio: float
-    centroid: float
+    level: float
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, eq=False)
 class Reference:
-    """Infrared measurements taken at enrollment."""
-    face_level: float
-    nose_low: float
-    nose_high: float
-    centroid_slope: float
+    """Measurements taken at enrollment."""
+    infrared_level: float
+    shape_median: np.ndarray
+    shape_spread: np.ndarray
 
 
 @dataclass(frozen=True)
@@ -135,7 +146,8 @@ def find_turn(samples: Sequence[ColorSample], gaps: Sequence[float], timing: Tim
     steps = np.diff([sample.yaw for sample in segment])
     one_way = float((steps <= JITTER).mean()) if len(steps) else 0.0
     covered = {bin_of(sample.yaw) for sample in segment} - {None}
-    details = f"frames {len(segment)}, {last - first:.2f}s, one way {100 * one_way:.0f}%, angles {len(covered)}"
+    details = (f"frames {len(segment)}, {last - first:.2f}s, {segment[0].yaw:+.0f} to {segment[-1].yaw:+.0f} deg, "
+               f"one way {100 * one_way:.0f}%, angles {len(covered)}")
     if not (len(segment) >= MINIMUM_TURN_FRAMES and len(covered) >= MINIMUM_ANGLE_BINS):
         return Verdict(False, "TURN_TOO_FAST", details)
     if not one_way >= MONOTONIC_FRACTION:
@@ -148,9 +160,7 @@ def find_turn(samples: Sequence[ColorSample], gaps: Sequence[float], timing: Tim
     evidence_start = turn_start
     while evidence_start > 0:
         before, after = samples[evidence_start - 1], samples[evidence_start]
-        if before.timestamp < first - EVIDENCE_SECONDS_BEFORE_TURN:
-            break
-        if not _continuous(before, after, timing.color_interval):
+        if before.timestamp < first - EVIDENCE_SECONDS_BEFORE_TURN or not _continuous(before, after, timing.color_interval):
             break
         if any(before.timestamp < gap < after.timestamp for gap in gaps):
             break
@@ -159,8 +169,8 @@ def find_turn(samples: Sequence[ColorSample], gaps: Sequence[float], timing: Tim
 
 
 def identity_frames(samples: Sequence[ColorSample], turn: Turn) -> dict[int, list[int]]:
-    """The sharpest frames of every angle bin in the evidence window, which are the only
-    ones whose face embedding is needed."""
+    """The sharpest frames of every angle bin in the evidence window: the only frames whose
+    face embedding is needed."""
     by_bin: dict[int, list[int]] = {}
     for index in range(turn.evidence_start, turn.end + 1):
         angle = bin_of(samples[index].yaw)
@@ -170,6 +180,28 @@ def identity_frames(samples: Sequence[ColorSample], turn: Turn) -> dict[int, lis
             for angle, indexes in sorted(by_bin.items())}
 
 
+def three_dimensional_motion(samples: Sequence[ColorSample], turn: Turn) -> float:
+    """Median parallax between the frames nearest the right end of the turn and the frames
+    nearest its left end."""
+    segment = list(samples[turn.turn_start:turn.end + 1])
+    rightmost = sorted(segment, key=lambda sample: -sample.yaw)[:PARALLAX_PAIRS]
+    leftmost = sorted(segment, key=lambda sample: sample.yaw)[:PARALLAX_PAIRS]
+    values = [parallax(a.rigid, b.rigid, a.eye_distance, b.eye_distance) for a, b in zip(rightmost, leftmost)]
+    return float(np.median(values)) if values else 0.0
+
+
+def shape_deviation(samples: Sequence[ColorSample], turn: Turn, reference: Reference) -> tuple[float, int]:
+    """Mean distance of the face's proportions from the enrolled ones, in tolerances
+    (1 means on average at the edge), and how many frontal frames it rests on."""
+    frontal = [sample.shape for sample in samples[turn.evidence_start:turn.end + 1]
+               if abs(sample.yaw) <= FRONTAL_YAW and abs(sample.pitch) <= FRONTAL_PITCH]
+    if len(frontal) < MINIMUM_FRONTAL_FRAMES:
+        return math.inf, len(frontal)
+    measured = np.median(np.array(frontal), axis=0)
+    tolerance = np.maximum(SHAPE_SPREADS * reference.shape_spread, SHAPE_FLOOR * np.abs(reference.shape_median))
+    return float(np.mean(np.abs(measured - reference.shape_median) / tolerance)), len(frontal)
+
+
 def judge(samples: Sequence[ColorSample], turn: Turn, chosen: dict[int, list[int]],
           similarity: Callable[[int], float], infrared: Sequence[InfraredSample],
           reference: Reference, thresholds: Thresholds, timing: Timing) -> Verdict:
@@ -177,40 +209,43 @@ def judge(samples: Sequence[ColorSample], turn: Turn, chosen: dict[int, list[int
     per_bin = np.array([max(similarity(index) for index in indexes) for indexes in chosen.values()], dtype=float)
     if len(per_bin) == 0:
         return Verdict(False, "COLOR_MISMATCH", details)
-    details += (f", color bins {len(per_bin)} min {per_bin.min():.2f} median {np.median(per_bin):.2f}")
+    details += f", color bins {len(per_bin)} min {per_bin.min():.2f} median {np.median(per_bin):.2f}"
     if not ((per_bin >= thresholds.match).mean() >= MATCH_FRACTION
             and np.median(per_bin) >= thresholds.color_median
             and per_bin.min() >= thresholds.match_floor):
         return Verdict(False, "COLOR_MISMATCH", details)
 
+    motion = three_dimensional_motion(samples, turn)
+    details += f", parallax {100 * motion:.0f}%"
+    if not motion >= PARALLAX_MINIMUM:
+        return Verdict(False, "NOT_THREE_DIMENSIONAL", details)
+
+    deviation, frontal = shape_deviation(samples, turn, reference)
+    details += f", shape {deviation:.2f} over {frontal} frames"
+    if frontal < MINIMUM_FRONTAL_FRAMES:
+        return Verdict(False, "SHAPE_UNMEASURED", details)
+    if not deviation <= 1.0:
+        return Verdict(False, "SHAPE_MISMATCH", details)
+
     margin = INFRARED_WINDOW_INTERVALS * timing.infrared_interval
     window_start = samples[turn.evidence_start].timestamp - margin
     window_end = samples[turn.end].timestamp + margin
     seen = [sample for sample in infrared if window_start <= sample.timestamp <= window_end]
-    infrared_bins: dict[int, InfraredSample] = {}
+    sharpest: dict[int, InfraredSample] = {}
     for sample in seen:
         angle = bin_of(sample.yaw)
-        if angle is not None and (angle not in infrared_bins or sample.sharpness > infrared_bins[angle].sharpness):
-            infrared_bins[angle] = sample
-    details += f", infrared frames {len(seen)} bins {len(infrared_bins)}"
-    if not (len(seen) >= MINIMUM_INFRARED_FRAMES and infrared_bins):
+        if angle is not None and (angle not in sharpest or sample.sharpness > sharpest[angle].sharpness):
+            sharpest[angle] = sample
+    details += f", infrared frames {len(seen)} bins {len(sharpest)}"
+    if not (len(seen) >= MINIMUM_INFRARED_FRAMES and sharpest):
         return Verdict(False, "INFRARED_TOO_FEW", details)
-    infrared_median = statistics.median(sample.similarity for sample in infrared_bins.values())
-    face_level = statistics.median(sample.face_level for sample in seen)
-    nose_ratio = statistics.median(sample.nose_ratio for sample in seen)
-    yaws = np.array([sample.yaw for sample in seen])
-    centroids = np.array([sample.centroid for sample in seen])
-    slope = float(np.polyfit(yaws, centroids, 1)[0]) if np.ptp(yaws) > DEPTH_MINIMUM_YAW_SPAN else 0.0
-    details += (f" median {infrared_median:.2f}, level {face_level:.1f}/{reference.face_level:.1f}, "
-                f"nose {nose_ratio:.2f}, slope {slope:+.3f}/{reference.centroid_slope:+.3f}")
+    infrared_median = statistics.median(sample.similarity for sample in sharpest.values())
+    level = statistics.median(sample.level for sample in seen)
+    details += f" median {infrared_median:.2f}, level {level:.0f}/{reference.infrared_level:.0f}"
     if not infrared_median >= thresholds.infrared:
         return Verdict(False, "INFRARED_MISMATCH", details)
-    if not (face_level >= FACE_LEVEL_FRACTION * reference.face_level
-            and reference.nose_low - NOSE_RATIO_MARGIN <= nose_ratio <= reference.nose_high + NOSE_RATIO_MARGIN):
+    if not level >= INFRARED_LEVEL_FRACTION * reference.infrared_level:
         return Verdict(False, "INFRARED_NOT_LIVE", details)
-    if not (reference.centroid_slope * slope > 0
-            and abs(slope) >= DEPTH_SLOPE_FRACTION * abs(reference.centroid_slope)):
-        return Verdict(False, "DEPTH_CUE_FAILED", details)
     return Verdict(True, "ACCEPTED", details)
 
 
@@ -225,7 +260,7 @@ def _find_sweep(yaws: Sequence[float]) -> tuple[int, int] | str:
             peak = index
         if yaws[peak] >= TURN_SIDE:
             saw_right = True
-            if index > peak and yaw <= -TURN_SIDE and yaws[peak] - yaw >= TURN_TOTAL:
+            if index > peak and yaw <= -TURN_SIDE:
                 return peak, index
     return "LEFT_TURN_MISSING" if saw_right else "RIGHT_TURN_MISSING"
 

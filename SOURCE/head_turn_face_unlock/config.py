@@ -32,7 +32,7 @@ class Settings:
     # How long the service keeps its models loaded after the last request.
     IDLE_EXIT_SECONDS: float = 600.0
     # Cosine similarity between face embeddings (SFace). Measured on the author's machine:
-    # the enrolled person 0.69-0.91 in color and 0.87-0.94 in infrared, other people 0.21-0.25.
+    # the enrolled person 0.69-0.91 in color and 0.80-0.94 in infrared, other people 0.21-0.25.
     MATCH_THRESHOLD: float = 0.60
     COLOR_MEDIAN_THRESHOLD: float = 0.65
     MATCH_FLOOR: float = 0.45

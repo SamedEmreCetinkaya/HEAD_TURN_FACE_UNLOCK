@@ -2,11 +2,13 @@ import math
 import unittest
 from dataclasses import replace
 
+import numpy as np
+
 import helpers
 from helpers import REFERENCE, THRESHOLDS, TIMING, color_track, infrared_track
 
 from head_turn_face_unlock import decision
-from head_turn_face_unlock.decision import Turn, Verdict
+from head_turn_face_unlock.decision import Reference, Turn, Verdict
 
 
 def decide(samples, gaps=(), infrared=None, similarity=0.8, reference=REFERENCE, final=False):
@@ -21,7 +23,7 @@ def decide(samples, gaps=(), infrared=None, similarity=0.8, reference=REFERENCE,
 
 
 class TurnTests(unittest.TestCase):
-    def test_a_clean_turn_is_accepted(self):
+    def test_a_clean_turn_of_a_real_head_is_accepted(self):
         verdict = decide(color_track())
         self.assertTrue(verdict.accepted, verdict)
 
@@ -30,32 +32,36 @@ class TurnTests(unittest.TestCase):
         self.assertEqual(decision.find_turn(color_track()[:3], [], TIMING, set(), final=True).reason, "NO_FACE")
 
     def test_missing_right_turn(self):
-        verdict = decide(color_track([0.0] * 10 + [-0.1 * i for i in range(8)]), final=True)
-        self.assertEqual(verdict.reason, "RIGHT_TURN_MISSING")
+        self.assertEqual(decide(color_track([0.0] * 10 + [-3.0 * i for i in range(12)]), final=True).reason,
+                         "RIGHT_TURN_MISSING")
 
     def test_missing_left_turn(self):
-        verdict = decide(color_track([0.05 * i for i in range(10)] + [0.45 - 0.05 * i for i in range(8)]), final=True)
-        self.assertEqual(verdict.reason, "LEFT_TURN_MISSING")
+        yaws = [2.5 * i for i in range(12)] + [30 - 2.5 * i for i in range(10)]
+        self.assertEqual(decide(color_track(yaws), final=True).reason, "LEFT_TURN_MISSING")
+
+    def test_half_turns_do_not_count(self):
+        to_left = list(np.linspace(0, 30, 10)) + list(np.linspace(30, -12, 15)) + [-12.0] * 10
+        verdict = decide(color_track(to_left), final=True)
+        self.assertEqual((verdict.accepted, verdict.reason), (False, "LEFT_TURN_MISSING"))
+        to_right = list(np.linspace(0, 12, 10)) + list(np.linspace(12, -30, 15)) + [-30.0] * 10
+        verdict = decide(color_track(to_right), final=True)
+        self.assertEqual((verdict.accepted, verdict.reason), (False, "RIGHT_TURN_MISSING"))
 
     def test_left_to_right_is_not_accepted(self):
-        verdict = decide(color_track([-y for y in helpers.turn_yaws()]), final=True)
-        self.assertFalse(verdict.accepted)
+        self.assertFalse(decide(color_track([-y for y in helpers.turn_yaws()]), final=True).accepted)
 
     def test_a_jump_from_right_to_left_is_too_fast(self):
-        verdict = decide(color_track([0.0, 0.2, 0.4, 0.45, -0.4, -0.45, -0.45]))
-        self.assertEqual(verdict.reason, "TURN_TOO_FAST")
+        self.assertEqual(decide(color_track([0.0, 10, 20, 25, -25, -30, -30])).reason, "TURN_TOO_FAST")
 
     def test_zigzag_is_not_one_way(self):
-        yaws = [0.45]
-        for step in range(60):
-            yaws.append(yaws[-1] + (0.09 if step % 2 else -0.12))
-        verdict = decide(color_track([0.0, 0.2] + yaws))
-        self.assertEqual(verdict.reason, "TURN_NOT_ONE_WAY")
+        yaws = [0.0, 15.0, 30.0]
+        for step in range(40):
+            yaws.append(yaws[-1] + (5.0 if step % 2 else -8.0))
+        self.assertEqual(decide(color_track(yaws)).reason, "TURN_NOT_ONE_WAY")
 
-    def test_a_frame_without_the_face_breaks_the_track(self):
+    def test_a_frame_without_one_face_breaks_the_track(self):
         samples = color_track()
-        verdict = decide(samples, gaps=[samples[20].timestamp + 0.01])
-        self.assertEqual(verdict.reason, "TRACK_BROKEN")
+        self.assertEqual(decide(samples, gaps=[samples[20].timestamp + 0.01]).reason, "TRACK_BROKEN")
 
     def test_a_position_jump_breaks_the_track(self):
         samples = color_track()
@@ -80,33 +86,19 @@ class TurnTests(unittest.TestCase):
     def test_identity_frames_are_the_sharpest_per_bin(self):
         samples = color_track()
         turn = decision.find_turn(samples, [], TIMING, set(), False)
-        chosen = decision.identity_frames(samples, turn)
-        for angle, indexes in chosen.items():
-            self.assertLessEqual(len(indexes), decision.IDENTITY_FRAMES_PER_BIN)
+        for angle, indexes in decision.identity_frames(samples, turn).items():
             in_bin = [i for i in range(turn.evidence_start, turn.end + 1) if decision.bin_of(samples[i].yaw) == angle]
             best = sorted(in_bin, key=lambda i: -samples[i].sharpness)[:len(indexes)]
             self.assertEqual(sorted(indexes), sorted(best))
+            self.assertLessEqual(len(indexes), decision.IDENTITY_FRAMES_PER_BIN)
 
 
-class IdentityTests(unittest.TestCase):
-    def test_another_person_is_rejected(self):
-        self.assertEqual(decide(color_track(), similarity=0.25).reason, "COLOR_MISMATCH")
+class LivenessTests(unittest.TestCase):
+    def test_a_flat_picture_turned_like_a_head_is_rejected(self):
+        samples = color_track(flat=True)
+        verdict = decide(samples, reference=helpers.reference_for(samples))
+        self.assertEqual(verdict.reason, "NOT_THREE_DIMENSIONAL")
 
-    def test_one_bin_below_the_floor_is_rejected(self):
-        samples = color_track()
-        weak = {i for i, s in enumerate(samples) if decision.bin_of(s.yaw) == 4}
-        self.assertEqual(decide(samples, similarity=lambda i: 0.3 if i in weak else 0.9).reason, "COLOR_MISMATCH")
-
-    def test_not_a_number_is_rejected(self):
-        self.assertFalse(decide(color_track(), similarity=math.nan).accepted)
-
-    def test_not_a_number_in_infrared_is_rejected(self):
-        samples = color_track()
-        self.assertFalse(decide(samples, infrared=infrared_track(samples, nose_ratio=math.nan)).accepted)
-        self.assertFalse(decide(samples, infrared=infrared_track(samples, similarity=math.nan)).accepted)
-
-
-class InfraredTests(unittest.TestCase):
     def test_too_few_infrared_frames(self):
         samples = color_track()
         self.assertEqual(decide(samples, infrared=infrared_track(samples)[:2]).reason, "INFRARED_TOO_FEW")
@@ -120,28 +112,48 @@ class InfraredTests(unittest.TestCase):
         samples = color_track()
         self.assertEqual(decide(samples, infrared=infrared_track(samples, similarity=0.5)).reason, "INFRARED_MISMATCH")
 
-    def test_a_dark_reflection_is_not_live(self):
+    def test_a_dark_infrared_reflection_is_not_live(self):
         samples = color_track()
-        verdict = decide(samples, infrared=infrared_track(samples, face_level=20.0))
-        self.assertEqual(verdict.reason, "INFRARED_NOT_LIVE")
+        self.assertEqual(decide(samples, infrared=infrared_track(samples, level=20.0)).reason, "INFRARED_NOT_LIVE")
 
-    def test_a_flat_nose_is_not_live(self):
-        samples = color_track()
-        verdict = decide(samples, infrared=infrared_track(samples, nose_ratio=0.8))
-        self.assertEqual(verdict.reason, "INFRARED_NOT_LIVE")
 
-    def test_a_flat_picture_fails_the_depth_cue(self):
+class IdentityTests(unittest.TestCase):
+    def test_another_person_is_rejected(self):
+        self.assertEqual(decide(color_track(), similarity=0.25).reason, "COLOR_MISMATCH")
+
+    def test_one_bin_below_the_floor_is_rejected(self):
         samples = color_track()
-        self.assertEqual(decide(samples, infrared=infrared_track(samples, slope=0.0)).reason, "DEPTH_CUE_FAILED")
-        self.assertEqual(decide(samples, infrared=infrared_track(samples, slope=-0.05)).reason, "DEPTH_CUE_FAILED")
+        weak = {i for i, s in enumerate(samples) if decision.bin_of(s.yaw) == 4}
+        self.assertEqual(decide(samples, similarity=lambda i: 0.3 if i in weak else 0.9).reason, "COLOR_MISMATCH")
+
+    def test_other_proportions_are_rejected(self):
+        different = Reference(REFERENCE.infrared_level, REFERENCE.shape_median * 1.2, REFERENCE.shape_spread)
+        self.assertEqual(decide(color_track(), reference=different).reason, "SHAPE_MISMATCH")
+
+    def test_proportions_need_frontal_frames(self):
+        yaws = [25.0] * 5 + list(np.linspace(30, -30, 6)) + [-25.0] * 5
+        self.assertIn(decide(color_track(yaws)).reason, ("SHAPE_UNMEASURED", "TURN_TOO_FAST"))
+        samples = color_track()
+        tilted = [replace(s, pitch=40.0) for s in samples]
+        self.assertEqual(decide(tilted).reason, "SHAPE_UNMEASURED")
+
+    def test_not_a_number_is_rejected(self):
+        samples = color_track()
+        self.assertFalse(decide(samples, similarity=math.nan).accepted)
+        self.assertFalse(decide(samples, infrared=infrared_track(samples, similarity=math.nan)).accepted)
+        self.assertFalse(decide(samples, infrared=infrared_track(samples, level=math.nan)).accepted)
+        broken = [replace(s, shape=np.full_like(s.shape, np.nan)) for s in samples]
+        self.assertFalse(decide(broken).accepted)
+        no_depth = [replace(s, rigid=np.zeros_like(s.rigid)) for s in samples]
+        self.assertFalse(decide(no_depth).accepted)
 
 
 class BinTests(unittest.TestCase):
     def test_edges(self):
-        self.assertEqual(decision.bin_of(-0.6), None)
-        self.assertEqual(decision.bin_of(-0.59), 0)
-        self.assertEqual(decision.bin_of(0.59), decision.BIN_COUNT - 1)
-        self.assertIsNone(decision.bin_of(0.61))
+        self.assertIsNone(decision.bin_of(-40.0))
+        self.assertEqual(decision.bin_of(-39.0), 0)
+        self.assertEqual(decision.bin_of(39.0), decision.BIN_COUNT - 1)
+        self.assertIsNone(decision.bin_of(41.0))
         self.assertIsNone(decision.bin_of(math.nan))
 
     def test_verdicts_are_immutable(self):

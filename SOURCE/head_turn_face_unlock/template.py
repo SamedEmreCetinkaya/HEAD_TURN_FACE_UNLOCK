@@ -1,10 +1,10 @@
-"""The enrolled face: embeddings per angle bin plus infrared reference measurements.
+"""The enrolled face: embeddings per angle bin, the infrared reflection level and the face's proportions.
 
-No image is kept. Each sample is a 128-number SFace embedding, stored as
-float16 (the rounding changes a cosine similarity by about 0.001, far below
-any threshold) so a full template stays under systemd's 1 MiB credential
-limit without compression. Reading is strict: wrong keys, wrong sizes,
-non-finite numbers or vectors that are not unit length are rejected.
+No image is kept. Each sample is a 128-number SFace embedding, stored as float16 (the
+rounding changes a cosine similarity by about 0.001, far below any threshold), so a full
+template stays under systemd's 1 MiB credential limit without compression. Reading is
+strict: wrong keys, wrong sizes, numbers that are not finite and vectors that are not unit
+length are refused.
 """
 
 from __future__ import annotations
@@ -19,17 +19,18 @@ from dataclasses import dataclass, field
 import numpy as np
 
 from .decision import BIN_COUNT, Reference
+from .geometry import SHAPE_NAMES
+from .vision import EMBEDDING_SIZE
 
 FORMAT = "HEAD_TURN_FACE_UNLOCK_TEMPLATE"
-VERSION = 1
-EMBEDDING_SIZE = 128
+VERSION = 2
 COLOR_LIMIT_PER_BIN = 60
 INFRARED_LIMIT_PER_BIN = 40
 MAXIMUM_TEXT_BYTES = 1 << 20
 MAXIMUM_ADDITIONS = 1000
 _DATE = re.compile(r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}$")
-_KEYS = {"format", "version", "direction", "color", "infrared", "infrared_face_level",
-         "infrared_nose_ratio", "infrared_centroid_slope", "created", "additions"}
+_KEYS = {"format", "version", "direction", "color", "infrared", "infrared_level", "shape_median",
+         "shape_spread", "created", "additions"}
 
 
 class TemplateError(ValueError):
@@ -78,11 +79,12 @@ def merge(old: Template, new: Template) -> Template:
         raise TemplateError("the turn direction differs from the existing enrollment")
     color = [prune(np.vstack([a, b]), COLOR_LIMIT_PER_BIN) for a, b in zip(old.color, new.color)]
     infrared = [prune(np.vstack([a, b]), INFRARED_LIMIT_PER_BIN) for a, b in zip(old.infrared, new.infrared)]
-    reference = Reference(
-        face_level=(old.reference.face_level + new.reference.face_level) / 2,
-        nose_low=min(old.reference.nose_low, new.reference.nose_low),
-        nose_high=max(old.reference.nose_high, new.reference.nose_high),
-        centroid_slope=(old.reference.centroid_slope + new.reference.centroid_slope) / 2)
+    first, second = old.reference, new.reference
+    median = (first.shape_median + second.shape_median) / 2
+    # The spread grows to cover both sessions; it never shrinks below either.
+    spread = np.maximum(np.maximum(first.shape_spread, second.shape_spread),
+                        np.abs(first.shape_median - second.shape_median) / 2)
+    reference = Reference((first.infrared_level + second.infrared_level) / 2, median, spread)
     additions = (old.additions + [new.created])[-MAXIMUM_ADDITIONS:]
     return Template(old.direction, color, infrared, reference, old.created, additions)
 
@@ -93,9 +95,9 @@ def to_json(template: Template) -> str:
     text = json.dumps({
         "format": FORMAT, "version": VERSION, "direction": template.direction,
         "color": encode(template.color), "infrared": encode(template.infrared),
-        "infrared_face_level": template.reference.face_level,
-        "infrared_nose_ratio": [template.reference.nose_low, template.reference.nose_high],
-        "infrared_centroid_slope": template.reference.centroid_slope,
+        "infrared_level": template.reference.infrared_level,
+        "shape_median": [float(value) for value in template.reference.shape_median],
+        "shape_spread": [float(value) for value in template.reference.shape_spread],
         "created": template.created, "additions": template.additions,
     }, separators=(",", ":"), allow_nan=False)
     if len(text) > MAXIMUM_TEXT_BYTES:
@@ -113,26 +115,23 @@ def from_json(text: str | bytes) -> Template:
     if not isinstance(data, dict) or set(data) != _KEYS:
         raise TemplateError("the template has missing or unknown fields")
     if data["format"] != FORMAT or data["version"] != VERSION:
-        raise TemplateError("unsupported template format or version")
+        raise TemplateError("unsupported template format or version; enroll again")
     if data["direction"] not in (1, -1) or isinstance(data["direction"], bool):
         raise TemplateError("direction must be 1 or -1")
     color = _decode_bank(data["color"], COLOR_LIMIT_PER_BIN, "color")
     infrared = _decode_bank(data["infrared"], INFRARED_LIMIT_PER_BIN, "infrared")
-    nose = data["infrared_nose_ratio"]
-    if not (isinstance(nose, list) and len(nose) == 2):
-        raise TemplateError("infrared_nose_ratio must hold two numbers")
-    level = _number(data["infrared_face_level"], "infrared_face_level")
-    low, high = _number(nose[0], "infrared_nose_ratio"), _number(nose[1], "infrared_nose_ratio")
-    slope = _number(data["infrared_centroid_slope"], "infrared_centroid_slope")
-    if not (level > 0 and 0 < low <= high and slope != 0):
-        raise TemplateError("infrared reference values are out of range")
+    level = _number(data["infrared_level"], "infrared_level")
+    median = _numbers(data["shape_median"], "shape_median")
+    spread = _numbers(data["shape_spread"], "shape_spread")
+    if not (level > 0 and (median > 0).all() and (spread >= 0).all()):
+        raise TemplateError("reference values are out of range")
     created, additions = data["created"], data["additions"]
     if not (isinstance(created, str) and _DATE.match(created)):
         raise TemplateError("created must be a date like 2026-01-31 12:00")
     if not (isinstance(additions, list) and len(additions) <= MAXIMUM_ADDITIONS
             and all(isinstance(item, str) and _DATE.match(item) for item in additions)):
         raise TemplateError("additions must be a list of dates")
-    return Template(data["direction"], color, infrared, Reference(level, low, high, slope), created, additions)
+    return Template(data["direction"], color, infrared, Reference(level, median, spread), created, additions)
 
 
 def _decode_bank(value: object, limit: int, name: str) -> list[np.ndarray]:
@@ -162,6 +161,12 @@ def _number(value: object, name: str) -> float:
     if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
         raise TemplateError(f"{name} must be a finite number")
     return float(value)
+
+
+def _numbers(value: object, name: str) -> np.ndarray:
+    if not (isinstance(value, list) and len(value) == len(SHAPE_NAMES)):
+        raise TemplateError(f"{name} must hold {len(SHAPE_NAMES)} numbers")
+    return np.array([_number(item, name) for item in value])
 
 
 def _unique_keys(pairs: list[tuple[str, object]]) -> dict[str, object]:

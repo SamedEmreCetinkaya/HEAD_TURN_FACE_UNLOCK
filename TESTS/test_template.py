@@ -22,7 +22,9 @@ class RoundTripTests(unittest.TestCase):
         for before, after in zip(original.color + original.infrared, restored.color + restored.infrared):
             self.assertEqual(before.shape, after.shape)
             self.assertGreater(float(np.min(np.sum(before * after, axis=1))), 0.999)
-        self.assertEqual(restored.reference, original.reference)
+        np.testing.assert_allclose(restored.reference.shape_median, original.reference.shape_median)
+        np.testing.assert_allclose(restored.reference.shape_spread, original.reference.shape_spread)
+        self.assertEqual(restored.reference.infrared_level, original.reference.infrared_level)
 
     def test_a_full_template_fits_a_system_credential(self):
         full = sample_template(per_bin=templates.COLOR_LIMIT_PER_BIN)
@@ -41,7 +43,7 @@ class StrictReadingTests(unittest.TestCase):
 
     def test_wrong_format_version_or_direction(self):
         self.assertRefused(edited(lambda d: d.update(format="OTHER")))
-        self.assertRefused(edited(lambda d: d.update(version=2)))
+        self.assertRefused(edited(lambda d: d.update(version=1)))
         self.assertRefused(edited(lambda d: d.update(direction=True)))
         self.assertRefused(edited(lambda d: d.update(direction=0)))
 
@@ -61,15 +63,17 @@ class StrictReadingTests(unittest.TestCase):
         self.assertRefused(edited(lambda d: d["infrared"].__setitem__(1, base64.b64encode(long).decode())))
 
     def test_non_finite_numbers_and_repeated_keys(self):
-        self.assertRefused(edited(lambda d: d.update(infrared_face_level=float("nan"))))
-        self.assertRefused(edited(lambda d: d.update(infrared_centroid_slope=float("inf"))))
+        self.assertRefused(edited(lambda d: d.update(infrared_level=float("nan"))))
+        self.assertRefused(edited(lambda d: d["shape_median"].__setitem__(0, float("inf"))))
         text = edited(lambda d: None)
         self.assertRefused(text[:-1] + ',"created":"2026-01-31 12:00"}')
 
     def test_out_of_range_reference(self):
-        self.assertRefused(edited(lambda d: d.update(infrared_centroid_slope=0)))
-        self.assertRefused(edited(lambda d: d.update(infrared_nose_ratio=[1.3, 1.1])))
-        self.assertRefused(edited(lambda d: d.update(infrared_face_level=-1)))
+        self.assertRefused(edited(lambda d: d.update(infrared_level=0)))
+        self.assertRefused(edited(lambda d: d["shape_median"].__setitem__(2, -1.0)))
+        self.assertRefused(edited(lambda d: d["shape_spread"].__setitem__(2, -0.1)))
+        self.assertRefused(edited(lambda d: d.update(shape_median=d["shape_median"][:-1])))
+        self.assertRefused(edited(lambda d: d["shape_spread"].__setitem__(0, True)))
 
     def test_bad_dates(self):
         self.assertRefused(edited(lambda d: d.update(created="yesterday")))
@@ -91,10 +95,13 @@ class MergeTests(unittest.TestCase):
 
     def test_merge_limits_and_combines(self):
         old, new = sample_template(per_bin=templates.COLOR_LIMIT_PER_BIN - 1), sample_template(per_bin=5, seed=50)
+        new.reference = type(new.reference)(new.reference.infrared_level * 2, new.reference.shape_median * 1.02,
+                                            new.reference.shape_spread * 0.5)
         merged = merge(old, new)
         self.assertTrue(all(len(bank) <= templates.COLOR_LIMIT_PER_BIN for bank in merged.color))
-        self.assertEqual(merged.created, old.created)
-        self.assertEqual(merged.additions, [new.created])
+        self.assertEqual((merged.created, merged.additions), (old.created, [new.created]))
+        self.assertAlmostEqual(merged.reference.infrared_level, old.reference.infrared_level * 1.5)
+        self.assertTrue((merged.reference.shape_spread >= old.reference.shape_spread).all())
 
     def test_merge_refuses_another_direction(self):
         other = sample_template()

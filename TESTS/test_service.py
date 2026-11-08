@@ -36,9 +36,18 @@ class ServiceTests(unittest.TestCase):
         listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         listener.bind(self.path)
         listener.listen(4)
-        self.addCleanup(listener.close)
         thread = threading.Thread(target=service.serve, args=(listener,), daemon=True)
         thread.start()
+
+        def stop():
+            # Wakes the blocked accept() so the service ends while its log is still captured.
+            try:
+                listener.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+            listener.close()
+            thread.join(2)
+        self.addCleanup(stop)
         return service, thread
 
     def ask(self, message: bytes):

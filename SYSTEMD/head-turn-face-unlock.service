@@ -35,7 +35,8 @@ ProtectControlGroups=yes
 ProtectClock=yes
 ProtectHostname=yes
 ProtectProc=invisible
-ProcSubset=pid
+# /proc stays readable for non-process files: LiteRT reads /proc/cpuinfo to pick its fast
+# CPU kernels and logs an error without it.
 LockPersonality=yes
 MemoryDenyWriteExecute=yes
 RestrictRealtime=yes

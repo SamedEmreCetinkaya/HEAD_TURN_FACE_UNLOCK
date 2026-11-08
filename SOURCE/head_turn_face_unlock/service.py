@@ -19,6 +19,7 @@ import time
 from typing import Callable
 
 from . import VERSION, cameras, messages, protocol, vision
+from .models import Models
 from .config import Settings
 from .session import Enrollment, SessionError, Verification, describe_template
 from .protocol import TEMPLATE_PREFIX
@@ -37,12 +38,12 @@ def log(line: str) -> None:
 class Service:
     def __init__(self, settings: Settings, model_directory: str, credentials_directory: str | None,
                  allowed_uid: int = 0, discover: Callable[[Settings], cameras.CameraPair | None] = cameras.discover,
-                 load_models: Callable[[str, int], vision.FaceModels] = vision.FaceModels) -> None:
+                 load_models: Callable[[str, int], Models] = Models) -> None:
         self.settings = settings
         self.credentials_directory = credentials_directory
         self.allowed_uid = allowed_uid
         self.discover = discover
-        self._models: vision.FaceModels | None = None
+        self._models: Models | None = None
         self._model_error = ""
         self._models_ready = threading.Event()
 
@@ -57,25 +58,29 @@ class Service:
         # Loading starts at once so it overlaps with opening the cameras for the first request.
         threading.Thread(target=load, daemon=True, name="models").start()
 
-    def models(self) -> vision.FaceModels:
+    def models(self) -> Models:
         if not self._models_ready.wait(MODEL_WAIT_SECONDS) or self._models is None:
             raise vision.ModelError(self._model_error or "models are still loading")
         return self._models
 
     def serve(self, listener: socket.socket) -> None:
         idle = self.settings.IDLE_EXIT_SECONDS
-        listener.settimeout(None)
+        # Started by its socket, a connection is already waiting; with no request for the idle
+        # time the service exits and the socket starts it again on the next one.
+        listener.settimeout(idle or None)
         while True:
             try:
                 connection, _ = listener.accept()
             except socket.timeout:
                 log("IDLE exiting")
                 return
+            except OSError as error:
+                log(f"LISTENER closed: {error.strerror}")
+                return
             with connection:
                 self.handle(connection)
             if idle == 0:
                 return
-            listener.settimeout(idle)
 
     def handle(self, connection: socket.socket) -> None:
         credentials = connection.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, struct.calcsize("3i"))
@@ -246,6 +251,8 @@ def main(argv: list[str]) -> int:
     if listener is None:
         log("this service is started by head-turn-face-unlock.socket")
         return 1
+    from .models import runtime_on_path
+    runtime_on_path()
     Service(settings, MODEL_DIRECTORY, os.environ.get("CREDENTIALS_DIRECTORY")).serve(listener)
     return 0
 

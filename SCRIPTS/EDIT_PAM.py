@@ -59,11 +59,14 @@ def add(pam_directory: str, backup_directory: str, polkit: bool) -> int:
 def add_polkit(pam_directory: str, backup_directory: str) -> int:
     path = os.path.join(pam_directory, "polkit-1")
     vendor = next((candidate for candidate in VENDOR_POLKIT if os.path.isfile(candidate)), None)
-    if os.path.isfile(path):
-        source = path
-    elif vendor:
-        source = vendor
+    saved_original = os.path.join(backup_directory, POLKIT_ORIGINAL)
+    ours = os.path.isfile(path) and pam_config.present(open(path, encoding="utf-8").read())
+    # Installing again regenerates the file from what was there before the first installation.
+    if ours:
+        source = saved_original if os.path.isfile(saved_original) else vendor
     else:
+        source = path if os.path.isfile(path) else vendor
+    if source is None:
         print("polkit-1: no PAM file found; skipped", file=sys.stderr)
         return 1
     try:
@@ -76,7 +79,7 @@ def add_polkit(pam_directory: str, backup_directory: str) -> int:
         print(f"polkit-1: {error}; skipped", file=sys.stderr)
         return 1
     os.makedirs(backup_directory, mode=0o700, exist_ok=True)
-    if not pam_config.present(original):
+    if not ours:
         if source == path:
             shutil.copy2(path, os.path.join(backup_directory, POLKIT_ORIGINAL))
         else:

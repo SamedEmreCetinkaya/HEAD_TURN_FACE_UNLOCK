@@ -14,8 +14,9 @@ password is in scope.
 
 - Root is trusted. Anyone with root can change PAM, the templates or the code.
 - The person enrolling is the person whose face is enrolled; enrollment asks for the password every time.
-- The infrared liveness checks (reflection level, nose reflection, brightness centroid moving with the
-  turn) are heuristics measured on one person. They raise the cost of photos and screens; they are not
-  a certified defence against masks or other presentation attacks.
+- The liveness checks (three-dimensional motion of the 478-point mesh during the turn, the face seen
+  and matched by the infrared camera, the infrared reflection, the face's proportions) were measured on
+  one person and a simulated flat picture. They raise the cost of photos and screens; they are not a
+  certified defence against masks or other presentation attacks.
 
 See the Security section of the [README](README.md) for the protections in place.

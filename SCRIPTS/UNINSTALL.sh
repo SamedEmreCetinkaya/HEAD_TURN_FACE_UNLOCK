@@ -26,7 +26,11 @@ find /usr/local/lib/head-turn-face-unlock/head_turn_face_unlock -maxdepth 1 -typ
 rm -rf /usr/local/lib/head-turn-face-unlock/head_turn_face_unlock/__pycache__
 rmdir /usr/local/lib/head-turn-face-unlock/head_turn_face_unlock 2> /dev/null || true
 rm -f /usr/local/lib/head-turn-face-unlock/models/face_detection_yunet_2023mar.onnx \
-      /usr/local/lib/head-turn-face-unlock/models/face_recognition_sface_2021dec.onnx
+      /usr/local/lib/head-turn-face-unlock/models/face_recognition_sface_2021dec.onnx \
+      /usr/local/lib/head-turn-face-unlock/models/face_detector.tflite \
+      /usr/local/lib/head-turn-face-unlock/models/face_landmarks_detector.tflite
+rm -rf /usr/local/lib/head-turn-face-unlock/runtime /usr/local/lib/head-turn-face-unlock/runtime.new \
+       /usr/local/lib/head-turn-face-unlock/runtime.old
 rmdir /usr/local/lib/head-turn-face-unlock/models /usr/local/lib/head-turn-face-unlock 2> /dev/null || true
 if [ "$PURGE" = yes ]; then
     find /etc/head-turn-face-unlock/templates -maxdepth 1 -type f -delete 2> /dev/null || true

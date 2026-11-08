@@ -114,6 +114,15 @@ class EditPamScriptTests(unittest.TestCase):
         with open(os.path.join(self.pam, name)) as handle:
             return handle.read()
 
+    def test_installing_again_keeps_every_file_and_the_record_of_the_original(self):
+        self.assertEqual(self.run_script("add", "--polkit").returncode, 0)
+        first = {name: self.read(name) for name in ("sudo", "gdm-password", "polkit-1")}
+        second_run = self.run_script("add", "--polkit")
+        self.assertEqual(second_run.returncode, 0, second_run.stderr)
+        self.assertEqual({name: self.read(name) for name in first}, first)
+        self.assertEqual(self.run_script("remove").returncode, 0)
+        self.assertEqual(self.read("polkit-1"), DEBIAN_POLKIT)
+
     def test_add_then_remove_returns_every_file_to_its_original(self):
         self.assertEqual(self.run_script("add", "--polkit").returncode, 0)
         self.assertTrue(pam_config.present(self.read("sudo")))
