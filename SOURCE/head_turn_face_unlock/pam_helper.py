@@ -21,7 +21,7 @@ import stat
 import subprocess
 import sys
 import time
-from typing import Callable, TextIO
+from typing import BinaryIO, Callable, TextIO
 
 from . import protocol
 from .config import ConfigError, load
@@ -65,8 +65,8 @@ def take_sudo_marker(uid: int, runtime_directory: str = "/run/user", now: Callab
     return stat.S_ISREG(info.st_mode) and info.st_uid == uid and -CLOCK_SKEW_SECONDS <= age <= MARKER_SECONDS
 
 
-def asked_with_letter_y(stdin: "os.PathLike | object") -> bool:
-    token = stdin.read(64)  # type: ignore[attr-defined]
+def asked_with_letter_y(stdin: BinaryIO) -> bool:
+    token = stdin.read(64)
     return token.replace(b"\0", b"").strip() in (b"y", b"Y")
 
 

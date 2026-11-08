@@ -17,7 +17,7 @@ import statistics
 import threading
 import time
 from dataclasses import dataclass
-from typing import Callable
+from typing import Callable, Protocol
 
 import cv2
 import numpy as np
@@ -27,6 +27,7 @@ from . import v4l2_capture as v4l2
 from .cameras import CameraPair
 from .config import Settings
 from .decision import ColorSample, InfraredSample, Reference, Timing, Turn, Verdict
+from .landmarks import FaceFinder
 from .template import Template, best_similarity, empty_bank, merge
 
 Say = Callable[[str], None]
@@ -55,12 +56,11 @@ class SessionError(Exception):
     """Ends a session; the argument is a message key."""
 
 
-class ModelSet:
+class ModelSet(Protocol):
     """What a session needs from models.Models; tests pass their own."""
     recognizer: vision.Recognizer
 
-    def new_finder(self):  # pragma: no cover - interface only
-        raise NotImplementedError
+    def new_finder(self) -> FaceFinder: ...  # pragma: no cover - interface only
 
 
 @dataclass

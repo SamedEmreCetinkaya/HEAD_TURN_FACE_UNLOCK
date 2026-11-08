@@ -206,7 +206,8 @@ def judge(samples: Sequence[ColorSample], turn: Turn, chosen: dict[int, list[int
           similarity: Callable[[int], float], infrared: Sequence[InfraredSample],
           reference: Reference, thresholds: Thresholds, timing: Timing) -> Verdict:
     details = turn.details
-    per_bin = np.array([max(similarity(index) for index in indexes) for indexes in chosen.values()], dtype=float)
+    per_bin = np.array([max(_measured(similarity(index)) for index in indexes) for indexes in chosen.values()],
+                       dtype=float)
     if len(per_bin) == 0:
         return Verdict(False, "COLOR_MISMATCH", details)
     details += f", color bins {len(per_bin)} min {per_bin.min():.2f} median {np.median(per_bin):.2f}"
@@ -247,6 +248,12 @@ def judge(samples: Sequence[ColorSample], turn: Turn, chosen: dict[int, list[int
     if not level >= INFRARED_LEVEL_FRACTION * reference.infrared_level:
         return Verdict(False, "INFRARED_NOT_LIVE", details)
     return Verdict(True, "ACCEPTED", details)
+
+
+def _measured(similarity: float) -> float:
+    """A similarity that could not be measured counts as no match. (max() over a NaN would
+    depend on where the NaN stands.)"""
+    return similarity if math.isfinite(similarity) else -1.0
 
 
 def _find_sweep(yaws: Sequence[float]) -> tuple[int, int] | str:

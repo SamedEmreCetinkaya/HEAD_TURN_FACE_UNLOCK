@@ -107,6 +107,15 @@ def fetch_models(library: str, local: str | None) -> None:
             print(f"{name}: installed from {BUNDLE} and verified")
 
 
+def read_stamp(path: str) -> str | None:
+    """The checksum the runtime was installed from, or None when it cannot be read."""
+    try:
+        with open(path, encoding="ascii") as handle:
+            return handle.read().strip()
+    except (OSError, UnicodeDecodeError):
+        return None
+
+
 def fetch_runtime(library: str, local: str | None) -> None:
     key = (f"cp{sys.version_info.major}{sys.version_info.minor}", platform.machine())
     if key not in RUNTIME_WHEELS:
@@ -116,7 +125,7 @@ def fetch_runtime(library: str, local: str | None) -> None:
     url, size, expected = RUNTIME_WHEELS[key]
     runtime = os.path.join(library, "runtime")
     stamp = os.path.join(runtime, RUNTIME_STAMP)
-    if os.path.isfile(stamp) and open(stamp, encoding="ascii").read().strip() == expected:
+    if read_stamp(stamp) == expected:
         print(f"LiteRT {RUNTIME_VERSION}: already installed")
         return
     data = obtain(url, size, expected, local)

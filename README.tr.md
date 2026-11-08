@@ -219,13 +219,23 @@ Bkz. [SECURITY.md](SECURITY.md).
 
 ## Testler
 
-```sh
-make test     # birim ve bütünleşme testleri; kamera ve root gerekmez, birkaç saniye
-make lint     # kuruluysa ruff, mypy ve shellcheck
-```
+Projenin nasıl denetlendiğini söyleyen tek yer `Makefile`'dır; push öncesi kancası da bir insan da aynı
+hedefleri çağırır ([ADR-0009](DOCS/ADR/0009-quality-gates.md)). `make help` hepsini listeler.
 
-`HEAD_TURN_FACE_UNLOCK_MODELS` ve `HEAD_TURN_FACE_UNLOCK_RUNTIME` kurulu modelleri ve LiteRT'yi
-gösterdiğinde testler gerçek ağları da çalıştırır.
+| Komut | Root | Kamera | Süre | Ne gösterir |
+| --- | --- | --- | --- | --- |
+| `make ci` | Hayır | Hayır | 25 saniye | Önce `make lint`, sonra kapsamla bütün testler; push öncesi kancasının çalıştırdığı |
+| `make test` | Hayır | Hayır | 15 saniye | Geliştirme araçları olmadan bütün testler |
+| `make lint` | Hayır | Hayır | 3 saniye | Her Python dosyası derlenir, pakete mypy, her kabuk betiğine shellcheck, kuruluysa ruff |
+| `make coverage` | Hayır | Hayır | 20 saniye | Satır kapsamıyla bütün testler; `TOOLS/CI/COVERAGE_FLOOR.txt` içindeki tabanının altına düşen modül kırmızı, üstüne çıkanın tabanı yükselir |
+| `make coverage-floor` | Hayır | Hayır | 20 saniye | Her tabanı ölçüme eşitler: bir tabanı bilerek düşürmenin yolu |
+| `make doctor` | Hayır | Hayır | 1 saniye | Hangi geliştirme araçlarının eksik olduğu ve nasıl kurulacağı |
+| `make hooks` | Hayır | Hayır | 1 saniye | Bu kopyadan her `git push` öncesinde `make ci` çalışır |
+| `python3 SCRIPTS/SHOW_GEOMETRY.py` | Hayır | Evet | Kapatılana dek | Ağ örgüsü, bölgeler, duruş, paralaks, oranlar ve kızılötesi yansıma, canlı |
+
+Geliştirme araçları: `python3-coverage`, `mypy` ve `shellcheck` (`make doctor` Debian, Fedora ve Arch
+Linux için komutu verir). `HEAD_TURN_FACE_UNLOCK_MODELS` ve `HEAD_TURN_FACE_UNLOCK_RUNTIME` kurulu
+modelleri ve LiteRT'yi gösterdiğinde testler gerçek ağları da çalıştırır.
 
 | Dosya | Kapsadığı |
 | --- | --- |
@@ -240,6 +250,10 @@ gösterdiğinde testler gerçek ağları da çalıştırır.
 | `test_v4l2_and_cameras.py` | `<linux/videodev2.h>` ile karşılaştırılan ioctl numaraları, satır adımları, kamera eşleştirme ve kip seçimi |
 | `test_vision.py` | Yüz çevresi içindeki kızılötesi yansıma, eşleştirme, netlik, çözme, model sağlamaları, kuruluysa gerçek tanıyıcı |
 | `test_config.py`, `test_cli.py` | Gelen ayarlar ve her tür hatanın reddi; bir komutun kimin yüzünü değiştirdiği |
+| `test_fuzz.py` | İsteklerin, şablonların, ayarların ve PAM dosyalarının tohumlu binlerce bozulmuş hâli: her ayrıştırıcı ya kendi hatasıyla reddeder ya da geçerli bir şey döndürür. Rastgele dedektör çıktısı, rastgele yüz noktaları ve gerçek bir dönüşte bozuk ölçümler: hiçbir şey çökmez, ölçülemeyen bir değer hiçbir yüzü geçirmez |
+| `test_leak.py` | Servise 400 istek ve 30 tam doğrulama boyunca açık dosyalar, bellek ve iş parçacıkları artmaz |
+| `test_naming.py` | Her klasör, dosya, modül düzeyindeki ad ve ayar aşağıdaki adlandırma standardına uyar |
+| `test_documentation.py` | Belgeler koda karşı: iki README'nin ayar ve test tabloları, `make help` listesi, `THIRD_PARTY.md` içindeki her sabitlenmiş sağlama, sürümün değişiklik kaydı, iki dildeki mesajlar, karar kayıtlarının numaraları ve bölümleri |
 
 Yayımlanmadan önce kurulum geçici bir sanal makinede root olarak da çalıştırıldı: iki kez kurma,
 `--no-pam` ile PAM'e dokunulmaması, soket izinleri, sudoers kuralı, servis kum havuzunda açılıp yüklenen
@@ -266,7 +280,11 @@ kapalı tutan bozuk bir şablon (girişler şifreyle devam eder), PAM değişikl
 | `SYSTEMD/` | Soket ve servis birimleri |
 | `CONFIG/` | Varsayılan ayarlar |
 | `SCRIPTS/` | Kurma, kaldırma, bileşen indirme, PAM düzenleme, canlı geometri penceresi |
-| `TESTS/` | Birim ve bütünleşme testleri |
+| `TESTS/` | Birim, bütünleşme, bozuk girdi, sızıntı, adlandırma ve belge testleri |
+| `TOOLS/CI/` | Kapsam cırcırı ve tabanları |
+| `DOCS/ADR/` | Mimari karar kayıtları: sistemin neden böyle kurulduğu |
+| `.githooks/` | Push öncesi kancası (`make hooks`) |
+| `THIRD_PARTY.md`, `CHANGELOG.md` | İndirilen her bileşen, lisansı ve sağlamasıyla; sürüm sürüm değişiklikler |
 
 ## Adlandırma
 
@@ -277,6 +295,8 @@ kapalı tutan bozuk bir şablon (girişler şifreyle devam eder), PAM değişikl
 | Python modülleri, fonksiyonları ve değişkenleri | `lower_snake_case` | `pam_helper.py` |
 | Standart proje dosyaları | Geleneksel | `README.md`, `Makefile`, `LICENSE` |
 
+`TESTS/test_naming.py` bu tabloyu her dosyada denetler ([ADR-0008](DOCS/ADR/0008-naming-standard.md)).
+
 ## Teşekkür
 
 - [MediaPipe Face Landmarker](https://ai.google.dev/edge/mediapipe/solutions/vision/face_landmarker): BlazeFace (yakın mesafe) ve Face Mesh V2, Apache Lisansı 2.0 (model kartları)
@@ -284,7 +304,8 @@ kapalı tutan bozuk bir şablon (girişler şifreyle devam eder), PAM değişikl
 - [SFace](https://github.com/opencv/opencv_zoo/tree/main/models/face_recognition_sface) yüz tanıyıcı, Apache Lisansı 2.0
 - [OpenCV](https://opencv.org/)
 
-Modeller ve çalıştırıcı kurulumda indirilir; bu deponun parçası değildir.
+Modeller ve çalıştırıcı kurulumda indirilir; bu deponun parçası değildir. Lisansları, boyutları ve
+sağlamaları [THIRD_PARTY.md](THIRD_PARTY.md) dosyasındadır.
 
 ## Lisans
 

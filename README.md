@@ -219,13 +219,23 @@ Please report vulnerabilities privately through GitHub (Security, Report a vulne
 
 ## Tests
 
-```sh
-make test     # unit and integration tests, no camera, no root, a few seconds
-make lint     # ruff, mypy and shellcheck when they are installed
-```
+The `Makefile` is the only place that says how the project is checked; the pre-push hook and a person
+call the same targets ([ADR-0009](DOCS/ADR/0009-quality-gates.md)). `make help` lists them.
 
-With `HEAD_TURN_FACE_UNLOCK_MODELS` and `HEAD_TURN_FACE_UNLOCK_RUNTIME` pointing at installed models
-and LiteRT, the tests also run the real networks.
+| Command | Root | Camera | Time | What it shows |
+| --- | --- | --- | --- | --- |
+| `make ci` | No | No | 25 seconds | `make lint`, then every test with coverage; what the pre-push hook runs |
+| `make test` | No | No | 15 seconds | Every test, without development tools |
+| `make lint` | No | No | 3 seconds | Every Python file compiles, mypy on the package, shellcheck on every shell script, ruff when installed |
+| `make coverage` | No | No | 20 seconds | Every test with line coverage; a module below its floor in `TOOLS/CI/COVERAGE_FLOOR.txt` fails, a module above raises its floor |
+| `make coverage-floor` | No | No | 20 seconds | Sets every floor to the measurement: the deliberate way to lower one |
+| `make doctor` | No | No | 1 second | Which development tools are missing and how to install them |
+| `make hooks` | No | No | 1 second | Runs `make ci` before every `git push` from this clone |
+| `python3 SCRIPTS/SHOW_GEOMETRY.py` | No | Yes | Until closed | The mesh, regions, pose, parallax, proportions and infrared reflection, live |
+
+Development tools: `python3-coverage`, `mypy` and `shellcheck` (`make doctor` gives the command for
+Debian, Fedora and Arch Linux). With `HEAD_TURN_FACE_UNLOCK_MODELS` and `HEAD_TURN_FACE_UNLOCK_RUNTIME`
+pointing at installed models and LiteRT, the tests also run the real networks.
 
 | File | Covers |
 | --- | --- |
@@ -240,6 +250,10 @@ and LiteRT, the tests also run the real networks.
 | `test_v4l2_and_cameras.py` | ioctl numbers against `<linux/videodev2.h>`, row strides, camera pairing and mode choice |
 | `test_vision.py` | Infrared reflection inside the outline, pairing, sharpness, decoding, model checksums, the real recognizer when installed |
 | `test_config.py`, `test_cli.py` | The shipped settings and refusal of every kind of mistake; whose face a command changes |
+| `test_fuzz.py` | Thousands of seeded mutations of requests, templates, settings and PAM files: each parser refuses with its own error or returns something valid. Random detector output, random landmarks, and broken measurements in a real turn: nothing raises, and an unmeasured value never helps a face through |
+| `test_leak.py` | Open files, memory and threads stay flat over 400 requests to the service and 30 whole verifications |
+| `test_naming.py` | Every directory, file, module-level name and setting follows the naming standard below |
+| `test_documentation.py` | The documents against the code: the settings and test tables of both READMEs, the `make help` list, every pinned checksum in `THIRD_PARTY.md`, a changelog entry for the version, the messages in both languages, and the numbering and sections of the decision records |
 
 Before release, the installer was also run as root in a throwaway virtual machine: install twice,
 PAM untouched with `--no-pam`, socket mode, the sudoers rule, LiteRT unpacked and loaded inside the
@@ -267,7 +281,11 @@ removal restoring every PAM file exactly.
 | `SYSTEMD/` | Socket and service units |
 | `CONFIG/` | Default settings |
 | `SCRIPTS/` | Install, uninstall, component download, PAM editing, the live geometry window |
-| `TESTS/` | Unit and integration tests |
+| `TESTS/` | Unit, integration, bad-input, leak, naming and documentation tests |
+| `TOOLS/CI/` | The coverage ratchet and its floors |
+| `DOCS/ADR/` | Architecture decision records: why the system is built this way |
+| `.githooks/` | The pre-push hook (`make hooks`) |
+| `THIRD_PARTY.md`, `CHANGELOG.md` | Every downloaded component with its licence and checksum; changes per version |
 
 ## Naming
 
@@ -278,6 +296,8 @@ removal restoring every PAM file exactly.
 | Python modules, functions and variables | `lower_snake_case` | `pam_helper.py` |
 | Standard project files | Conventional | `README.md`, `Makefile`, `LICENSE` |
 
+`TESTS/test_naming.py` checks this table on every file ([ADR-0008](DOCS/ADR/0008-naming-standard.md)).
+
 ## Credits
 
 - [MediaPipe Face Landmarker](https://ai.google.dev/edge/mediapipe/solutions/vision/face_landmarker): BlazeFace short range and Face Mesh V2, Apache License 2.0 (model cards)
@@ -285,7 +305,8 @@ removal restoring every PAM file exactly.
 - [SFace](https://github.com/opencv/opencv_zoo/tree/main/models/face_recognition_sface) face recognizer, Apache License 2.0
 - [OpenCV](https://opencv.org/)
 
-The models and the runtime are downloaded at installation and are not part of this repository.
+The models and the runtime are downloaded at installation and are not part of this repository; their
+licences, sizes and checksums are in [THIRD_PARTY.md](THIRD_PARTY.md).
 
 ## License
 

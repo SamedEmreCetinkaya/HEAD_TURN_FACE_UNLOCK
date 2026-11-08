@@ -1,0 +1,22 @@
+# Coverage floors: `make coverage` compares every module with these.
+# Not edited by hand: the tool raises a floor when coverage rises, and
+# `make coverage-floor` lowers floors on purpose. See TOOLS/CI/COVERAGE.py.
+__init__ 100.0
+cameras 89.1
+cli 24.7
+config 100.0
+decision 98.9
+geometry 100.0
+landmarks 74.1
+messages 100.0
+model_files 100.0
+models 45.4
+pam_config 97.5
+pam_helper 81.6
+protocol 94.0
+service 70.7
+session 88.7
+template 99.2
+v4l2_capture 59.4
+vision 83.0
+TOTAL 79.1

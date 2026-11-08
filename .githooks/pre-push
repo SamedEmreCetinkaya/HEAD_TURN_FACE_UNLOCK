@@ -1,0 +1,12 @@
+#!/bin/sh
+# Runs the same gate as everyone else: the Makefile's ci target. The hook keeps no list of
+# its own, so it can never drift from the Makefile.
+# To skip it once, on purpose: git push --no-verify
+set -eu
+cd "$(dirname "$0")/.."
+echo "── pre-push: make ci ──────────────────────"
+if ! make ci; then
+    echo
+    echo "push stopped: make ci failed. Fix it, or skip on purpose with: git push --no-verify"
+    exit 1
+fi

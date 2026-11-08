@@ -43,9 +43,8 @@ SYSTEMD_VERSION=$(systemctl --version | awk 'NR == 1 { print $2 + 0 }')
 command -v loginctl > /dev/null || fail "loginctl is required"
 python3 -I -B -c "import sys; sys.path.insert(0, '$ROOT/SOURCE'); import head_turn_face_unlock.v4l2_capture" \
     || fail "the V4L2 structures do not match this platform (64-bit Linux is required)"
-for module in pam_exec.so; do
-    find /usr/lib /lib /usr/lib64 -name "$module" -path '*security*' 2>/dev/null | grep -q . || fail "$module is missing"
-done
+find /usr/lib /lib /usr/lib64 -name pam_exec.so -path '*security*' 2>/dev/null | grep -q . \
+    || fail "pam_exec.so is missing"
 
 echo "Installing files"
 install -d -m 755 "$LIBRARY" "$LIBRARY/head_turn_face_unlock" "$LIBEXEC"
