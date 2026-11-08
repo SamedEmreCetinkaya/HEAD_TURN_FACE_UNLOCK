@@ -1,0 +1,15 @@
+[Unit]
+Description=Head-turn face unlock verification socket
+Documentation=https://github.com/SamedEmreCetinkaya/HEAD_TURN_FACE_UNLOCK
+
+[Socket]
+ListenStream=/run/head-turn-face-unlock/verify.sock
+# Only root may ask: the PAM helper and the administration command.
+SocketUser=root
+SocketGroup=root
+SocketMode=0600
+DirectoryMode=0700
+Accept=no
+
+[Install]
+WantedBy=sockets.target

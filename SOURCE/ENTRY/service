@@ -1,0 +1,8 @@
+#!/usr/bin/python3 -IB
+"""Verification service, started by head-turn-face-unlock.socket."""
+import sys
+
+sys.path.insert(0, "/usr/local/lib/head-turn-face-unlock")
+from head_turn_face_unlock.service import main  # noqa: E402
+
+sys.exit(main(sys.argv[1:]))

@@ -1,0 +1,8 @@
+#!/usr/bin/python3 -IB
+"""Called by pam_exec. Exit 0 only when the face was verified; anything else means the password."""
+import sys
+
+sys.path.insert(0, "/usr/local/lib/head-turn-face-unlock")
+from head_turn_face_unlock.pam_helper import run  # noqa: E402
+
+run()

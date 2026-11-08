@@ -1,0 +1,52 @@
+[Unit]
+Description=Head-turn face unlock verification
+Documentation=https://github.com/SamedEmreCetinkaya/HEAD_TURN_FACE_UNLOCK
+Requires=head-turn-face-unlock.socket
+After=head-turn-face-unlock.socket
+
+[Service]
+Type=simple
+ExecStart=/usr/local/libexec/head-turn-face-unlock/service
+# systemd decrypts every enrolled template (TPM2 and/or host key) into memory that only
+# this service can read. The service never sees the key.
+LoadCredentialEncrypted=TEMPLATE:/etc/head-turn-face-unlock/templates
+Environment=OPENCV_LOG_LEVEL=ERROR
+
+# An unprivileged account that exists only while the service runs, with the cameras and
+# nothing else.
+DynamicUser=yes
+SupplementaryGroups=video
+DevicePolicy=closed
+DeviceAllow=char-video4linux rw
+PrivateNetwork=yes
+# The listening socket comes from systemd; the service never creates one.
+RestrictAddressFamilies=none
+IPAddressDeny=any
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=invisible
+ProcSubset=pid
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RestrictRealtime=yes
+RestrictNamespaces=yes
+RestrictSUIDSGID=yes
+RemoveIPC=yes
+KeyringMode=private
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources
+SystemCallErrorNumber=EPERM
+UMask=0077
+TasksMax=64
+TimeoutStopSec=5

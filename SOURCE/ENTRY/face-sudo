@@ -1,0 +1,13 @@
+#!/bin/sh
+# Runs sudo once with face verification. If the face is not verified, sudo asks for the
+# password as usual. Plain sudo never tries the face.
+# The request is a file in the user's private runtime directory, which only the user and
+# root can write; the PAM helper accepts it for ten seconds and deletes it.
+set -u
+umask 077
+marker="/run/user/$(id -u)/head-turn-face-unlock-sudo"
+: > "$marker" || exit 1
+sudo "$@"
+status=$?
+rm -f "$marker"
+exit "$status"
