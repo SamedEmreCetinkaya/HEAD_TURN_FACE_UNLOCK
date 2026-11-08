@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import pwd
 import socket
 import subprocess
 import sys
@@ -25,10 +26,29 @@ SERVICE_UNIT = "head-turn-face-unlock.service"
 SOCKET_UNIT = "head-turn-face-unlock.socket"
 
 
-def _user(arguments: argparse.Namespace) -> str:
-    user = arguments.user or os.environ.get("SUDO_USER", "")
+def login_user(loginuid_path: str = "/proc/self/loginuid") -> str:
+    """The account that logged in on this terminal. sudo and su do not change it, so it is
+    still the person when the command runs from a root shell opened with sudo -i."""
+    try:
+        with open(loginuid_path, encoding="ascii") as handle:
+            uid = int(handle.read().strip())
+    except (OSError, ValueError):
+        return ""
+    if uid in (0, 0xFFFFFFFF):
+        return ""
+    try:
+        return pwd.getpwuid(uid).pw_name
+    except KeyError:
+        return ""
+
+
+def _user(arguments: argparse.Namespace, loginuid_path: str = "/proc/self/loginuid") -> str:
+    user = arguments.user or ""
+    if not user:
+        invoked_by = os.environ.get("SUDO_USER", "")
+        user = invoked_by if invoked_by and invoked_by != "root" else login_user(loginuid_path)
     if not protocol.valid_user(user) or user == "root":
-        raise SystemExit("Name the person with --user (run through sudo to default to yourself).")
+        raise SystemExit("Name the person with --user, for example: head-turn-face-unlock add --user NAME")
     return user
 
 

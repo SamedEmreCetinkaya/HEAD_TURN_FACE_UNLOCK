@@ -192,7 +192,7 @@ Please report vulnerabilities privately through GitHub (Security, Report a vulne
 ## Tests
 
 ```sh
-make test     # 105 tests, no camera, no root, a few seconds
+make test     # 109 tests, no camera, no root, a few seconds
 make lint     # ruff, mypy and shellcheck when they are installed
 ```
 
@@ -213,6 +213,7 @@ reaching the service and falling back to the password, and removal restoring eve
 | `test_v4l2_and_cameras.py` | ioctl numbers against `<linux/videodev2.h>`, row strides, camera pairing and mode choice |
 | `test_vision.py` | Head angle, infrared profile (including a nose outside the face box), pairing, sharpness, decoding, model checksums; with `HEAD_TURN_FACE_UNLOCK_MODELS` set, the real models |
 | `test_config.py` | The shipped settings, and refusal of every kind of mistake |
+| `test_cli.py` | Whose face a command changes: `--user`, the person who ran `sudo`, the login account in a root shell |
 
 ## Known limits
 
