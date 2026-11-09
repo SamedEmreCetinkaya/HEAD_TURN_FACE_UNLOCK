@@ -4,7 +4,7 @@ Every change a user or an installer would notice. Versions follow [Semantic Vers
 a template or settings change that needs a new enrollment is a major version. The newest version is on
 top; `Unreleased` collects changes until the next version.
 
-## Unreleased
+## 2.0.1 · 2026-11-09
 
 ### Changed
 
