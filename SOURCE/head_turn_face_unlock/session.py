@@ -164,6 +164,13 @@ class _Worker(threading.Thread):
                                                         vision.sharpness(lit, centre_x, centre_y, width), level))
 
 
+def _brightness(image: np.ndarray) -> tuple[float, float]:
+    """Mean brightness of the whole frame and of its middle third, 0-255."""
+    height, width = image.shape[:2]
+    middle = image[height // 3:height - height // 3, width // 3:width - width // 3]
+    return sum(cv2.mean(image)[:3]) / 3, sum(cv2.mean(middle)[:3]) / 3
+
+
 class _Capture:
     """Frame handling shared by verification and enrollment."""
 
@@ -182,6 +189,10 @@ class _Capture:
         self.infrared_empty = 0
         self.tracked_frames = 0
         self.tracking_seconds = 0.0
+        # Why color frames had no usable face, for the journal: nothing else reads these.
+        self.unreadable = 0
+        self.detections_seen: dict[str, int] = {"none": 0, "several": 0, "landmarks rejected": 0}
+        self.brightness: list[tuple[float, float]] = []
 
     def color_frame(self, frame: v4l2.Frame) -> _Color | None:
         started = time.perf_counter()
@@ -194,10 +205,13 @@ class _Capture:
     def _color_frame(self, frame: v4l2.Frame) -> _Color | None:
         image = vision.decode_half(frame.data)
         if image is None:
+            self.unreadable += 1
             return None
-        _, face = self.finder.find(cv2.cvtColor(image, cv2.COLOR_BGR2RGB))
+        self.brightness.append(_brightness(image))
+        count, face = self.finder.find(cv2.cvtColor(image, cv2.COLOR_BGR2RGB))
         if face is None:
             self.gaps.append(frame.timestamp)
+            self.detections_seen["none" if count == 0 else "several" if count > 1 else "landmarks rejected"] += 1
             return None
         yaw, pitch, _ = geometry.pose(face.points)
         centre_x, centre_y, width = geometry.face_box(face.points)
@@ -213,6 +227,17 @@ class _Capture:
         if len(frame.data) < frame.stride * frame.mode.height:
             return None
         return self.pairer.push(np.ascontiguousarray(frame.grey()))
+
+    def color_diagnosis(self) -> str:
+        """Frames without a usable face by cause, and the median brightness of the whole frame
+        and of its middle (0-255): a dark middle in a bright frame means light from behind."""
+        causes = ", ".join(f"{cause} {count}" for cause, count in self.detections_seen.items())
+        if self.brightness:
+            whole, middle = np.median(np.array(self.brightness), axis=0)
+            light = f", brightness {whole:.0f} middle {middle:.0f}"
+        else:
+            light = ""
+        return f"{causes}, unreadable {self.unreadable}{light}"
 
     def forget_old(self) -> None:
         """Drops the compressed data of old frames; their measurements stay."""
@@ -314,7 +339,8 @@ class Verification:
         capture = self.capture
         tracking = 1000 * capture.tracking_seconds / max(1, capture.tracked_frames)
         self.statistics = (f"{capture.clock() - started:.1f}s color {len(capture.colors)}/{capture.tracked_frames} "
-                           f"tracking {tracking:.1f} ms/frame infrared {len(self.infrared)} "
+                           f"({capture.color_diagnosis()}) tracking {tracking:.1f} ms/frame infrared faces "
+                           f"{capture.infrared_faces}/{capture.infrared_faces + capture.infrared_empty} "
                            f"embeddings {len(self.requested)}")
         return verdict
 

@@ -15,8 +15,8 @@ pam_config 97.5
 pam_helper 81.6
 protocol 94.0
 service 70.7
-session 88.7
+session 88.9
 template 99.2
 v4l2_capture 59.4
 vision 83.0
-TOTAL 79.2
+TOTAL 79.4

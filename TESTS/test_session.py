@@ -6,6 +6,7 @@ capture loop, pairing, geometry, embedding requests and decision run unchanged o
 clock without a camera or a model.
 """
 
+import re
 import unittest
 from unittest import mock
 
@@ -85,12 +86,15 @@ class FakeStreams:
 
 
 class FakeFinder:
-    def __init__(self, yaws, infrared_blind=False):
-        self.yaws, self.infrared_blind = yaws, infrared_blind
+    def __init__(self, yaws, infrared_blind=False, faceless=None):
+        self.yaws, self.infrared_blind, self.faceless = yaws, infrared_blind, faceless or {}
 
     def find(self, rgb):
         if rgb.shape[:2] == (1, 1):  # a color frame marker
-            yaw = self.yaws[int(rgb[0, 0, 0])]
+            index = int(rgb[0, 0, 0])
+            if index in self.faceless:  # detections seen in a frame whose face is not usable
+                return self.faceless[index], None
+            yaw = self.yaws[index]
             return (0, None) if yaw is None else (1, Face(view(yaw), 1.0))
         if self.infrared_blind or rgb.max() == 0:
             return 0, None
@@ -108,12 +112,13 @@ class FakeRecognizer:
 
 
 class FakeModels:
-    def __init__(self, yaws, owner=OWNER, owner_infrared=OWNER_INFRARED, noise=0.0, infrared_blind=False):
+    def __init__(self, yaws, owner=OWNER, owner_infrared=OWNER_INFRARED, noise=0.0, infrared_blind=False,
+                 faceless=None):
         self.recognizer = FakeRecognizer(owner, owner_infrared, noise)
-        self.yaws, self.infrared_blind = yaws, infrared_blind
+        self.yaws, self.infrared_blind, self.faceless = yaws, infrared_blind, faceless
 
     def new_finder(self):
-        return FakeFinder(self.yaws, self.infrared_blind)
+        return FakeFinder(self.yaws, self.infrared_blind, self.faceless)
 
 
 class SyncWorker(session._Worker):
@@ -154,6 +159,7 @@ class VerificationTests(SessionTestCase):
         verification = session.Verification(models or FakeModels(yaws), PAIR, owner_template(), Settings(),
                                             said.append, cancelled=cancelled, clock=script.clock)
         verdict = verification.run(lambda result: script.log.append("delivered"))
+        self.statistics = verification.statistics
         return verdict, said, script
 
     def test_the_owner_turning_is_accepted_before_the_cameras_close(self):
@@ -178,6 +184,29 @@ class VerificationTests(SessionTestCase):
         yaws[18] = None
         verdict, _, _ = self.verify(yaws)
         self.assertEqual(verdict.reason, "TRACK_BROKEN")
+
+    def test_the_journal_says_why_color_frames_had_no_face(self):
+        yaws = [0.0] * 160
+        verdict, _, _ = self.verify(yaws, models=FakeModels(yaws, faceless={3: 0, 4: 2, 5: 3, 6: 1}))
+        self.assertEqual(verdict.reason, "RIGHT_TURN_MISSING")
+        self.assertRegex(self.statistics, r"^5\.0s color (\d+)/(\d+) \(none 1, several 2, landmarks rejected 1, "
+                                          r"unreadable 0, brightness \d+ middle \d+\) tracking [0-9.]+ ms/frame "
+                                          r"infrared faces (\d+)/\3 embeddings \d+$")
+        found, frames = map(int, re.match(r"[0-9.]+s color (\d+)/(\d+)", self.statistics).groups())
+        self.assertEqual(frames - found, 4)
+
+    def test_brightness_shows_light_from_behind(self):
+        frame = np.full((90, 160, 3), 200, np.uint8)
+        frame[30:60, 53:107] = 20
+        whole, middle = session._brightness(frame)
+        self.assertAlmostEqual(whole, (200 * (90 * 160 - 30 * 54) + 20 * 30 * 54) / (90 * 160), places=3)
+        self.assertAlmostEqual(middle, 20.0)
+        self.assertEqual(session._brightness(np.full((1, 1, 3), 7, np.uint8)), (7.0, 7.0))
+
+    def test_a_session_without_readable_frames_still_reports(self):
+        capture = session._Capture(FakeModels([]), PAIR, 1, lambda: 0.0)
+        capture.unreadable = 4
+        self.assertEqual(capture.color_diagnosis(), "none 0, several 0, landmarks rejected 0, unreadable 4")
 
     def test_a_blind_infrared_camera_is_reported(self):
         yaws = helpers.turn_yaws() + [0.0] * 60
