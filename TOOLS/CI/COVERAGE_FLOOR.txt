@@ -5,7 +5,7 @@ __init__ 100.0
 cameras 89.1
 cli 24.7
 config 100.0
-decision 98.9
+decision 99.0
 geometry 100.0
 landmarks 74.1
 messages 100.0
@@ -19,4 +19,4 @@ session 88.7
 template 99.2
 v4l2_capture 59.4
 vision 83.0
-TOTAL 79.1
+TOTAL 79.2

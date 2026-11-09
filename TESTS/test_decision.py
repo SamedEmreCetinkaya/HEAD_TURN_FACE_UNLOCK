@@ -61,22 +61,34 @@ class TurnTests(unittest.TestCase):
 
     def test_a_frame_without_one_face_breaks_the_track(self):
         samples = color_track()
-        self.assertEqual(decide(samples, gaps=[samples[20].timestamp + 0.01]).reason, "TRACK_BROKEN")
+        verdict = decide(samples, gaps=[samples[20].timestamp + 0.01, samples[21].timestamp + 0.01])
+        self.assertEqual(verdict.reason, "TRACK_BROKEN")
+        self.assertIn(f"face not found in 2 frames, first between {samples[20].yaw:+.0f} and {samples[21].yaw:+.0f} deg",
+                      verdict.details)
 
     def test_a_position_jump_breaks_the_track(self):
         samples = color_track()
         samples[20] = replace(samples[20], center_x=samples[20].center_x + 100)
-        self.assertEqual(decide(samples).reason, "TRACK_BROKEN")
+        verdict = decide(samples)
+        self.assertEqual(verdict.reason, "TRACK_BROKEN")
+        before, after = samples[19], samples[20]
+        moved = math.hypot(after.center_x - before.center_x, after.center_y - before.center_y) / before.width
+        self.assertTrue(verdict.details.endswith(f", moved {moved:.2f} face widths in 1 frames at {samples[20].yaw:+.0f} deg"),
+                        verdict.details)
 
     def test_a_size_jump_breaks_the_track(self):
         samples = color_track()
         samples[20] = replace(samples[20], width=samples[20].width * 1.6)
-        self.assertEqual(decide(samples).reason, "TRACK_BROKEN")
+        verdict = decide(samples)
+        self.assertEqual(verdict.reason, "TRACK_BROKEN")
+        self.assertIn(f"size changed 1.60 times at {samples[20].yaw:+.0f} deg", verdict.details)
 
     def test_a_long_pause_breaks_the_track(self):
         samples = color_track()
         samples = samples[:20] + [replace(s, timestamp=s.timestamp + 1.0) for s in samples[20:]]
-        self.assertEqual(decide(samples).reason, "TRACK_BROKEN")
+        verdict = decide(samples)
+        self.assertEqual(verdict.reason, "TRACK_BROKEN")
+        self.assertIn(f"no frame for 1.03 s at {samples[20].yaw:+.0f} deg", verdict.details)
 
     def test_a_turn_is_judged_once(self):
         samples, evaluated = color_track(), set()

@@ -4,6 +4,13 @@ Every change a user or an installer would notice. Versions follow [Semantic Vers
 a template or settings change that needs a new enrollment is a major version. The newest version is on
 top; `Unreleased` collects changes until the next version.
 
+## Unreleased
+
+### Changed
+
+- A `TRACK_BROKEN` line in the journal now says which check broke the track (face not found, no frame,
+  moved, size changed) and at what angle.
+
 ## 2.0.0 · 2026-11-09
 
 Enrollments made with version 1 cannot be read; enroll again after upgrading.

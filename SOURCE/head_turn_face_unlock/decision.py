@@ -152,11 +152,16 @@ def find_turn(samples: Sequence[ColorSample], gaps: Sequence[float], timing: Tim
         return Verdict(False, "TURN_TOO_FAST", details)
     if not one_way >= MONOTONIC_FRACTION:
         return Verdict(False, "TURN_NOT_ONE_WAY", details)
-    if any(first < gap < last for gap in gaps):
-        return Verdict(False, "TRACK_BROKEN", details)
+    lost = [gap for gap in gaps if first < gap < last]
+    if lost:
+        before = [sample for sample in segment if sample.timestamp < lost[0]][-1]
+        after = next(sample for sample in segment if sample.timestamp > lost[0])
+        return Verdict(False, "TRACK_BROKEN", f"{details}, face not found in {len(lost)} frames, first between "
+                                              f"{before.yaw:+.0f} and {after.yaw:+.0f} deg")
     for before, after in zip(segment, segment[1:]):
-        if not _continuous(before, after, timing.color_interval):
-            return Verdict(False, "TRACK_BROKEN", details)
+        broken = _discontinuity(before, after, timing.color_interval)
+        if broken:
+            return Verdict(False, "TRACK_BROKEN", f"{details}, {broken} at {after.yaw:+.0f} deg")
     evidence_start = turn_start
     while evidence_start > 0:
         before, after = samples[evidence_start - 1], samples[evidence_start]
@@ -273,10 +278,20 @@ def _find_sweep(yaws: Sequence[float]) -> tuple[int, int] | str:
 
 
 def _continuous(before: ColorSample, after: ColorSample, interval: float) -> bool:
+    return not _discontinuity(before, after, interval)
+
+
+def _discontinuity(before: ColorSample, after: ColorSample, interval: float) -> str:
+    """Why the face may not be the same face from one frame to the next, or "" when it is.
+    Every test is written so that a value that is not a number fails it."""
     elapsed = after.timestamp - before.timestamp
+    if not 0 < elapsed <= MAXIMUM_GAP_INTERVALS * interval:
+        return f"no frame for {elapsed:.2f} s"
     width = max(before.width, 1.0)
     jump = math.hypot(after.center_x - before.center_x, after.center_y - before.center_y) / width
+    if not jump <= JUMP_FACE_WIDTHS_PER_INTERVAL * max(1.0, elapsed / interval):
+        return f"moved {jump:.2f} face widths in {elapsed / interval:.0f} frames"
     ratio = after.width / width
-    return (0 < elapsed <= MAXIMUM_GAP_INTERVALS * interval
-            and jump <= JUMP_FACE_WIDTHS_PER_INTERVAL * max(1.0, elapsed / interval)
-            and SIZE_RATIO_RANGE[0] < ratio < SIZE_RATIO_RANGE[1])
+    if not SIZE_RATIO_RANGE[0] < ratio < SIZE_RATIO_RANGE[1]:
+        return f"size changed {ratio:.2f} times"
+    return ""
