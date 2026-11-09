@@ -173,8 +173,9 @@ Her şeyi kaldırmak için (önce PAM geri yüklenir): `sudo sh HEAD_TURN_FACE_U
 | `face-sudo KOMUT` | Yüzle `sudo`; düz `sudo` şifre sormaya devam eder |
 | `python3 -IB SCRIPTS/SHOW_GEOMETRY.py` | Ağı, duruşu, paralaksı ve oranları gösteren canlı pencere (root olarak değil, kendi hesabınızla) |
 
-Kilit ekranında kameraya bakın ve başınızı sağdan sola çevirin. Kızılötesi kamera sizi göremezse
-(görüş alanı genellikle daha dardır) ekranı biraz yatırmanız söylenir.
+Kilit ekranında kameraya bakın ve başınızı yavaşça, her yöne 30–40° kadar ve yaklaşık bir saniyede
+sağdan sola çevirin. Kızılötesi kamera sizi göremezse (görüş alanı genellikle daha dardır) ekranı
+biraz yatırmanız söylenir.
 
 Yönetim komutu, başka bir `sudo`'nun hemen ardından bile her zaman şifre ister: kilitsiz bir oturumun
 başına oturan biri kendi yüzünü kaydedememelidir.

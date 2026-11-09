@@ -10,6 +10,8 @@ top; `Unreleased` collects changes until the next version.
 
 - A `TRACK_BROKEN` line in the journal now says which check broke the track (face not found, no frame,
   moved, size changed) and at what angle.
+- The prompt asks for a slow turn, and the two refusals that a turn of less than half a second causes
+  (`INFRARED_TOO_FEW`, `SHAPE_UNMEASURED`) say to turn more slowly.
 
 ## 2.0.0 · 2026-11-09
 

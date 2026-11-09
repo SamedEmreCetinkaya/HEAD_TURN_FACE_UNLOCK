@@ -173,8 +173,9 @@ Enrollments and settings stay unless you add `--purge`.
 | `face-sudo COMMAND` | `sudo` with the face; plain `sudo` keeps asking for the password |
 | `python3 -IB SCRIPTS/SHOW_GEOMETRY.py` | A live window with the mesh, pose, parallax and proportions (as yourself, not root) |
 
-On the lock screen, look at the camera and turn your head from right to left. If the infrared camera
-cannot see you (it usually has a narrower view), you are told to tilt the screen.
+On the lock screen, look at the camera and turn your head slowly from right to left, about 30–40° each
+way in about a second. If the infrared camera cannot see you (it usually has a narrower view), you are
+told to tilt the screen.
 
 The administration command always asks for the password, even right after another `sudo`: whoever
 sits at an unlocked session must not be able to enroll their own face.
