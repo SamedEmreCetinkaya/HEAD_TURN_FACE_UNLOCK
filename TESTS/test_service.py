@@ -130,6 +130,18 @@ class ServiceTests(unittest.TestCase):
             right.close()
             self.assertTrue(replies.cancelled())
 
+    def test_a_hint_follows_the_reason(self):
+        left, right = socket.socketpair()
+        with left, right:
+            from head_turn_face_unlock.service import _Replies
+            _Replies(left, "tr").result(False, "COLOR_MISMATCH", hint="TURN_SLOWER")
+            reply = protocol.Reader(right).next(time.monotonic() + 1)
+            self.assertEqual((reply["key"], reply["text"]), ("COLOR_MISMATCH", "yüz eşleşmedi: biraz daha yavaş dönün"))
+            plain = _Replies(left, "en")
+            plain.result(False, "COLOR_MISMATCH")
+            plain.result(True, "ACCEPTED")  # only the first verdict is sent
+            self.assertEqual(protocol.Reader(right).next(time.monotonic() + 1)["text"], "the face does not match")
+
 
 if __name__ == "__main__":
     unittest.main()

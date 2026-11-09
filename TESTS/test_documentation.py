@@ -87,8 +87,10 @@ class MessageTests(unittest.TestCase):
             tree = ast.parse(read(os.path.join("SOURCE", "head_turn_face_unlock", name)))
             for node in ast.walk(tree):
                 if isinstance(node, ast.Call) and getattr(node.func, "id", getattr(node.func, "attr", "")) in (
-                        "Verdict", "SessionError", "say", "result"):
-                    for argument in node.args:
+                        "Verdict", "SessionError", "say", "result", "_refusal"):
+                    arguments = node.args + [keyword.value for keyword in node.keywords]
+                    for argument in arguments + [part for argument in arguments if isinstance(argument, ast.IfExp)
+                                                 for part in (argument.body, argument.orelse)]:
                         if isinstance(argument, ast.Constant) and isinstance(argument.value, str) \
                                 and re.fullmatch(r"[A-Z][A-Z_]+", argument.value):
                             used.add(argument.value)

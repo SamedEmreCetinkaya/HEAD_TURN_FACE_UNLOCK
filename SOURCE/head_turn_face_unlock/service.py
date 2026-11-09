@@ -122,7 +122,7 @@ class Service:
         try:
             verification = Verification(self.models(), pair, template, self.settings, replies.say,
                                         cancelled=replies.cancelled)
-            verdict = verification.run(lambda result: replies.result(result.accepted, result.reason))
+            verdict = verification.run(lambda result: replies.result(result.accepted, result.reason, hint=result.hint))
         except vision.ModelError:
             replies.result(False, "UNAVAILABLE")
             log(f"{prefix} result=UNAVAILABLE models: {self._model_error}")
@@ -222,12 +222,15 @@ class _Replies:
     def progress(self, percentages: list[int]) -> None:
         self._send({"type": "PROGRESS", "percentages": percentages})
 
-    def result(self, accepted: bool, key: str, **extra: object) -> None:
+    def result(self, accepted: bool, key: str, hint: str = "", **extra: object) -> None:
+        """The verdict; a hint key adds its text after the reason's, for example what to do."""
         if self.delivered:
             return
         self.delivered = True
-        self._send({"type": "RESULT", "accepted": accepted, "key": key,
-                    "text": messages.text(key, self._language), **extra})
+        text = messages.text(key, self._language)
+        if hint:
+            text += ": " + messages.text(hint, self._language)
+        self._send({"type": "RESULT", "accepted": accepted, "key": key, "text": text, **extra})
 
     def cancelled(self) -> bool:
         """True once the client has hung up (for example sudo was interrupted)."""

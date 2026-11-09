@@ -10,8 +10,9 @@ top; `Unreleased` collects changes until the next version.
 
 - A `TRACK_BROKEN` line in the journal now says which check broke the track (face not found, no frame,
   moved, size changed) and at what angle.
-- The prompt asks for a slow turn, and the two refusals that a turn of less than half a second causes
-  (`INFRARED_TOO_FEW`, `SHAPE_UNMEASURED`) say to turn more slowly.
+- The prompt asks for a slow turn. A refusal after a turn shorter than half a second, and every refusal
+  caused by too few frames (`INFRARED_TOO_FEW`, `SHAPE_UNMEASURED`), ends with "turn a little more
+  slowly"; before, a quick turn was refused as "the face does not match" with nothing about the speed.
 - Each verification line in the journal says why color frames had no usable face (no detection,
   several detections, landmarks rejected, unreadable) with the median brightness of the frame and of
   its middle, and counts infrared frames as `infrared faces found/examined`.

@@ -58,6 +58,12 @@ FRONTAL_PITCH = 15.0
 MINIMUM_FRONTAL_FRAMES = 3
 SHAPE_SPREADS = 3.0
 SHAPE_FLOOR = 0.03
+# A refusal after a turn shorter than this also asks for a slower turn: at 30 frames per
+# second such a turn leaves blurred frames and only one or two frames per angle (journal of
+# 2026-11-09: refused turns of 0.25-0.56 s, accepted ones mostly 0.4-1.2 s).
+QUICK_TURN_SECONDS = 0.5
+# Refusals that happen only when a turn gives too few frames: they always ask for a slower turn.
+_TOO_FEW_FRAMES = ("SHAPE_UNMEASURED", "INFRARED_TOO_FEW")
 
 
 def bin_of(yaw: float) -> int | None:
@@ -119,6 +125,7 @@ class Turn:
     turn_start: int
     end: int
     details: str
+    seconds: float = math.inf
 
 
 @dataclass(frozen=True)
@@ -126,6 +133,7 @@ class Verdict:
     accepted: bool
     reason: str
     details: str = ""
+    hint: str = ""  # a message key added to the reason's text, or ""
 
 
 def find_turn(samples: Sequence[ColorSample], gaps: Sequence[float], timing: Timing,
@@ -156,12 +164,12 @@ def find_turn(samples: Sequence[ColorSample], gaps: Sequence[float], timing: Tim
     if lost:
         before = [sample for sample in segment if sample.timestamp < lost[0]][-1]
         after = next(sample for sample in segment if sample.timestamp > lost[0])
-        return Verdict(False, "TRACK_BROKEN", f"{details}, face not found in {len(lost)} frames, first between "
-                                              f"{before.yaw:+.0f} and {after.yaw:+.0f} deg")
+        return _refusal("TRACK_BROKEN", f"{details}, face not found in {len(lost)} frames, first between "
+                                        f"{before.yaw:+.0f} and {after.yaw:+.0f} deg", last - first)
     for before, after in zip(segment, segment[1:]):
         broken = _discontinuity(before, after, timing.color_interval)
         if broken:
-            return Verdict(False, "TRACK_BROKEN", f"{details}, {broken} at {after.yaw:+.0f} deg")
+            return _refusal("TRACK_BROKEN", f"{details}, {broken} at {after.yaw:+.0f} deg", last - first)
     evidence_start = turn_start
     while evidence_start > 0:
         before, after = samples[evidence_start - 1], samples[evidence_start]
@@ -170,7 +178,7 @@ def find_turn(samples: Sequence[ColorSample], gaps: Sequence[float], timing: Tim
         if any(before.timestamp < gap < after.timestamp for gap in gaps):
             break
         evidence_start -= 1
-    return Turn(evidence_start, turn_start, end, details)
+    return Turn(evidence_start, turn_start, end, details, last - first)
 
 
 def identity_frames(samples: Sequence[ColorSample], turn: Turn) -> dict[int, list[int]]:
@@ -214,24 +222,24 @@ def judge(samples: Sequence[ColorSample], turn: Turn, chosen: dict[int, list[int
     per_bin = np.array([max(_measured(similarity(index)) for index in indexes) for indexes in chosen.values()],
                        dtype=float)
     if len(per_bin) == 0:
-        return Verdict(False, "COLOR_MISMATCH", details)
+        return _refusal("COLOR_MISMATCH", details, turn.seconds)
     details += f", color bins {len(per_bin)} min {per_bin.min():.2f} median {np.median(per_bin):.2f}"
     if not ((per_bin >= thresholds.match).mean() >= MATCH_FRACTION
             and np.median(per_bin) >= thresholds.color_median
             and per_bin.min() >= thresholds.match_floor):
-        return Verdict(False, "COLOR_MISMATCH", details)
+        return _refusal("COLOR_MISMATCH", details, turn.seconds)
 
     motion = three_dimensional_motion(samples, turn)
     details += f", parallax {100 * motion:.0f}%"
     if not motion >= PARALLAX_MINIMUM:
-        return Verdict(False, "NOT_THREE_DIMENSIONAL", details)
+        return _refusal("NOT_THREE_DIMENSIONAL", details, turn.seconds)
 
     deviation, frontal = shape_deviation(samples, turn, reference)
     details += f", shape {deviation:.2f} over {frontal} frames"
     if frontal < MINIMUM_FRONTAL_FRAMES:
-        return Verdict(False, "SHAPE_UNMEASURED", details)
+        return _refusal("SHAPE_UNMEASURED", details, turn.seconds)
     if not deviation <= 1.0:
-        return Verdict(False, "SHAPE_MISMATCH", details)
+        return _refusal("SHAPE_MISMATCH", details, turn.seconds)
 
     margin = INFRARED_WINDOW_INTERVALS * timing.infrared_interval
     window_start = samples[turn.evidence_start].timestamp - margin
@@ -244,15 +252,22 @@ def judge(samples: Sequence[ColorSample], turn: Turn, chosen: dict[int, list[int
             sharpest[angle] = sample
     details += f", infrared frames {len(seen)} bins {len(sharpest)}"
     if not (len(seen) >= MINIMUM_INFRARED_FRAMES and sharpest):
-        return Verdict(False, "INFRARED_TOO_FEW", details)
+        return _refusal("INFRARED_TOO_FEW", details, turn.seconds)
     infrared_median = statistics.median(sample.similarity for sample in sharpest.values())
     level = statistics.median(sample.level for sample in seen)
     details += f" median {infrared_median:.2f}, level {level:.0f}/{reference.infrared_level:.0f}"
     if not infrared_median >= thresholds.infrared:
-        return Verdict(False, "INFRARED_MISMATCH", details)
+        return _refusal("INFRARED_MISMATCH", details, turn.seconds)
     if not level >= INFRARED_LEVEL_FRACTION * reference.infrared_level:
-        return Verdict(False, "INFRARED_NOT_LIVE", details)
+        return _refusal("INFRARED_NOT_LIVE", details, turn.seconds)
     return Verdict(True, "ACCEPTED", details)
+
+
+def _refusal(reason: str, details: str, seconds: float) -> Verdict:
+    """A rejection; after a quick turn, or when too few frames were the cause, it asks for a
+    slower turn."""
+    slower = reason in _TOO_FEW_FRAMES or seconds < QUICK_TURN_SECONDS
+    return Verdict(False, reason, details, "TURN_SLOWER" if slower else "")
 
 
 def _measured(similarity: float) -> float:

@@ -83,6 +83,26 @@ class TurnTests(unittest.TestCase):
         self.assertEqual(verdict.reason, "TRACK_BROKEN")
         self.assertIn(f"size changed 1.60 times at {samples[20].yaw:+.0f} deg", verdict.details)
 
+    def test_a_refusal_after_a_quick_turn_asks_for_a_slower_one(self):
+        quick = color_track([0.0] * 10 + [10.0, 20, 30, 22, 14, 6, -2, -10, -18, -26, -30] + [-30.0] * 5)
+        verdict = decide(quick, similarity=0.3)
+        self.assertEqual((verdict.reason, verdict.hint), ("COLOR_MISMATCH", "TURN_SLOWER"))
+        self.assertIn("0.23s", verdict.details)
+        verdict = decide(quick, gaps=[quick[14].timestamp + 0.01])
+        self.assertEqual((verdict.reason, verdict.hint), ("TRACK_BROKEN", "TURN_SLOWER"))
+
+    def test_a_refusal_after_a_steady_turn_gives_no_advice(self):
+        verdict = decide(color_track(), similarity=0.3)
+        self.assertEqual((verdict.reason, verdict.hint), ("COLOR_MISMATCH", ""))
+        self.assertEqual(decide(color_track()).hint, "")
+        samples = color_track()
+        self.assertEqual(decide(samples, gaps=[samples[20].timestamp + 0.01]).hint, "")
+
+    def test_too_few_frames_always_ask_for_a_slower_turn(self):
+        samples = color_track()
+        verdict = decide(samples, infrared=infrared_track(samples)[:2])
+        self.assertEqual((verdict.reason, verdict.hint), ("INFRARED_TOO_FEW", "TURN_SLOWER"))
+
     def test_a_long_pause_breaks_the_track(self):
         samples = color_track()
         samples = samples[:20] + [replace(s, timestamp=s.timestamp + 1.0) for s in samples[20:]]
